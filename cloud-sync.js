@@ -21,6 +21,7 @@ import {
 import {
   getFirestore,
   doc,
+  getDocFromServer,
   setDoc,
   onSnapshot,
   serverTimestamp,
@@ -28,6 +29,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 
 import { firebaseConfig } from "./firebase-config.js";
+import { mergeById } from "./merge-by-id.js";
 
 // Every entity the API can write — NOT just the six this UI renders.
 //
@@ -62,10 +64,12 @@ appleProvider.addScope('name');
 
 const cloud = {
   user: null,             // firebase User or null
-  status: 'booting',      // 'booting' | 'signed-out' | 'signed-in' | 'syncing' | 'error'
+  status: 'booting',      // 'booting' | 'signed-out' | 'signed-in' | 'syncing' | 'error' | 'save-failed'
   lastError: null,
   unsubscribe: null,      // firestore listener disposer
   suppressNextRemote: false, // set true after a local push so we don't bounce it back to ourselves
+  pushing: false,         // true while a push is in flight (stops retry-tap pile-ups)
+  lastSaveError: null,
 
   async signIn() {
     try {
@@ -93,9 +97,12 @@ const cloud = {
   async pushLocalState() {
     if (!cloud.user) return; // not signed in — localStorage is the only store
     if (!window.appState) return;
+    cloud.pushing = true;
     try {
       const payload = buildStatePayload();
       cloud.suppressNextRemote = true;
+      // TEST-ONLY hook: lets browser tests force a save failure. Never set in production.
+      if (window.__nickosTestFailSave) throw new Error('test: save failed');
       // merge:true, deliberately. merge:false replaced the WHOLE document, so any
       // field absent from this payload was deleted — which is how five entities got
       // wiped on every save. Deletions within a managed entity still work: that
@@ -105,14 +112,77 @@ const cloud = {
         { ...payload, _updatedAt: serverTimestamp() },
         { merge: true }
       );
+      // A successful push (including a retry) clears any save-failed pill.
+      cloud.lastSaveError = null;
+      cloud.status = 'signed-in';
+      try { localStorage.removeItem('nickos_unsaved'); } catch (_) {}
+      renderAuthUI();
     } catch (e) {
       console.error('[cloud-sync] push failed:', e);
       cloud.suppressNextRemote = false;
+      // Surface the failure: otherwise the user thinks their edits are saved.
+      cloud.lastSaveError = e && e.message ? e.message : String(e);
+      cloud.status = 'save-failed';
+      // Persist across reloads so a stale server copy can't overwrite local edits on next open.
+      try { localStorage.setItem('nickos_unsaved', '1'); } catch (_) {}
+      renderAuthUI();
+    } finally {
+      cloud.pushing = false;
+    }
+  },
+
+  // The ONLY path that pushes while unsaved (the save-failed pill's tap).
+  // Why: every entity is pushed as a wholesale array, so pushing the stale local
+  // copy would delete every record the API wrote since (e.g. tasks Claude added).
+  // Read the server first, merge by id (local wins on a shared id, server-only
+  // records are kept), then push the merged copy.
+  async retryUnsaved() {
+    if (!cloud.user || !window.appState) return;
+    cloud.pushing = true; // covers the read and the push, so taps can't pile up
+    try {
+      let server;
+      try {
+        // FromServer, not getDoc: with IndexedDB persistence on, getDoc returns the
+        // cached copy when offline, a stale merge base that could still drop
+        // server-only records. Offline must fail here and stay red instead.
+        const snap = await getDocFromServer(doc(db, 'users', cloud.user.uid, 'state', 'current'));
+        server = snap.exists() ? snap.data() : {};
+      } catch (e) {
+        // Can't see the server, so can't merge: don't push. Stay red.
+        console.error('[cloud-sync] retry read failed:', e);
+        cloud.lastSaveError = e && e.message ? e.message : String(e);
+        cloud.status = 'save-failed';
+        renderAuthUI();
+        return;
+      }
+      const merged = {};
+      ENTITY_KEYS.forEach(k => {
+        if (Array.isArray(server[k])) merged[k] = mergeById(window.appState[k], server[k]);
+      });
+      applyRemoteState(merged); // same apply + render helpers as the snapshot path
+      await cloud.pushLocalState(); // clears the flag and status on success
+    } finally {
+      cloud.pushing = false;
     }
   }
 };
 
+// While unsaved, nothing pushes except the retry tap, which merges the local copy
+// with the server by id first (see retryUnsaved). index.html loads nickos_v4 into
+// appState before this module runs, so the retry has the local copy to merge.
+try {
+  if (localStorage.getItem('nickos_unsaved') === '1') {
+    cloud.status = 'save-failed';
+    cloud.lastSaveError = 'Unsaved changes from a previous session';
+  }
+} catch (_) {}
+
 window.nickosCloud = cloud;
+
+function hasUnsaved() {
+  if (cloud.status === 'save-failed') return true;
+  try { return localStorage.getItem('nickos_unsaved') === '1'; } catch (_) { return false; }
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Auth state → Firestore subscription lifecycle
@@ -130,12 +200,20 @@ onAuthStateChanged(auth, async (user) => {
     return;
   }
 
-  cloud.status = 'syncing';
+  if (cloud.status !== 'save-failed') cloud.status = 'syncing';
   renderAuthUI();
 
   const stateRef = doc(db, 'users', user.uid, 'state', 'current');
 
   cloud.unsubscribe = onSnapshot(stateRef, async (snap) => {
+    // Unsaved local edits: never apply remote state until a push succeeds. Checks the
+    // persisted flag too, since status resets to 'signed-out'/'syncing' on sign-out/in.
+    if (hasUnsaved()) {
+      cloud.suppressNextRemote = false; // a guarded echo must not swallow a later real update
+      cloud.status = 'save-failed';
+      renderAuthUI();
+      return;
+    }
     if (cloud.suppressNextRemote) {
       // Echo of our own push; ignore so we don't re-render mid-type.
       cloud.suppressNextRemote = false;
@@ -147,9 +225,7 @@ onAuthStateChanged(auth, async (user) => {
     if (!snap.exists()) {
       // First sign-in on this account. Migrate whatever is in localStorage up.
       console.log('[cloud-sync] first sign-in: migrating localStorage → Firestore');
-      await cloud.pushLocalState();
-      cloud.status = 'signed-in';
-      renderAuthUI();
+      await cloud.pushLocalState(); // sets 'signed-in' itself on success, 'save-failed' on failure
       return;
     }
 
@@ -160,8 +236,9 @@ onAuthStateChanged(auth, async (user) => {
     renderAuthUI();
   }, (err) => {
     console.error('[cloud-sync] snapshot error:', err);
-    cloud.status = 'error';
     cloud.lastError = err.message;
+    // Keep the red unsaved pill visible during an outage; only record the error.
+    if (!hasUnsaved()) cloud.status = 'error';
     renderAuthUI();
   });
 });
@@ -253,6 +330,9 @@ function renderAuthUI() {
     case 'signed-in':
       inner = `${dot('#10b981')} <span>Synced</span> <button id="cloud-signout-btn" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Sign out</button>`;
       break;
+    case 'save-failed':
+      inner = `${dot('#ef4444')} <span title="${(cloud.lastSaveError||'').replace(/"/g,'&quot;')}">Not saved — tap to retry</span>`;
+      break;
     case 'error':
       inner = `${dot('#ef4444')} <span title="${(cloud.lastError||'').replace(/"/g,'&quot;')}">Offline</span> <button id="cloud-signin-btn" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Retry</button>`;
       break;
@@ -263,6 +343,8 @@ function renderAuthUI() {
   const outEl = document.getElementById('cloud-signout-btn');
   if (inEl)  inEl.addEventListener('click', () => cloud.signIn());
   if (outEl) outEl.addEventListener('click', () => cloud.signOut());
+  // The save-failed pill is itself the retry control; other states ignore pill clicks.
+  host.onclick = () => { if (cloud.status === 'save-failed' && !cloud.pushing) cloud.retryUnsaved(); };
 }
 
 renderAuthUI();
@@ -278,6 +360,10 @@ renderAuthUI();
       const original = window.saveToLocalStorage;
       window.saveToLocalStorage = function patched(...args) {
         const r = original.apply(this, args);
+        // Unsaved: save locally only and keep the pill red. A push here (autosave
+        // or any edit) would replace the server's arrays with the stale local copy
+        // and delete server-only records; only retryUnsaved() may push now.
+        if (hasUnsaved()) return r;
         // Fire-and-forget; don't block the UI thread.
         Promise.resolve().then(() => cloud.pushLocalState());
         return r;
