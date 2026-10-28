@@ -1566,7 +1566,8 @@
                 });
             });
 
-            // Auto-save
+            // Auto-save. Goes through the cloud-sync wrapper, which saves locally
+            // only (no push) while there are unsaved changes from a failed save.
             setInterval(() => {
                 saveToLocalStorage();
             }, 30000);
