@@ -28,8 +28,12 @@ import {
   enableIndexedDbPersistence
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 
-import { firebaseConfig } from "./firebase-config.js";
+import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js";
 import { mergeById } from "./merge-by-id.js";
+import { createV2Sync, resolveBackend } from "./v2-sync.js";
+
+const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
+const POLL_MS = 60000;
 
 // Every entity the API can write — NOT just the six this UI renders.
 //
@@ -52,7 +56,10 @@ const db   = getFirestore(app);
 
 // Offline cache — lets the app work without a connection.
 // Only enabled in a single tab at a time; failing silently is fine here.
-enableIndexedDbPersistence(db).catch(() => { /* already enabled or unsupported browser */ });
+// v2 doesn't use Firestore from the browser; every read and write goes through the API.
+if (backend.mode !== 'v2') {
+  enableIndexedDbPersistence(db).catch(() => { /* already enabled or unsupported browser */ });
+}
 
 const appleProvider = new OAuthProvider('apple.com');
 appleProvider.addScope('email');
@@ -96,6 +103,7 @@ const cloud = {
   // Called by the wrapped saveToLocalStorage() after a local change.
   async pushLocalState() {
     if (!cloud.user) return; // not signed in — localStorage is the only store
+    if (v2) return v2.push();
     if (!window.appState) return;
     cloud.pushing = true;
     try {
@@ -138,6 +146,11 @@ const cloud = {
   // records are kept), then push the merged copy.
   async retryUnsaved() {
     if (!cloud.user || !window.appState) return;
+    if (v2) {
+      cloud.pushing = true;
+      try { await v2.retry(); } finally { cloud.pushing = false; }
+      return;
+    }
     cloud.pushing = true; // covers the read and the push, so taps can't pile up
     try {
       let server;
@@ -179,6 +192,58 @@ try {
 
 window.nickosCloud = cloud;
 
+// ──────────────────────────────────────────────────────────────────────
+// The v2 backend. Only built when the config says so; v1 is untouched otherwise.
+// ──────────────────────────────────────────────────────────────────────
+
+const v2 = backend.mode === 'v2' ? createV2Sync({
+  apiBase: backend.apiBase,
+  getToken: () => (backend.devToken ? Promise.resolve(backend.devToken) : cloud.user.getIdToken()),
+  getState: () => window.appState,
+  storage: localStorage,
+  fetchImpl: (...a) => fetch(...a),
+  onStatus: (status, err) => {
+    cloud.status = status;
+    if (status === 'save-failed') cloud.lastSaveError = err;
+    if (status === 'error') cloud.lastError = err;
+    renderAuthUI();
+  },
+  render: () => {
+    if (typeof window.render !== 'function') return;
+    try { window.render(); } catch (e) { console.error('[cloud-sync] render after sync failed:', e); }
+  },
+  isBusy: () => Boolean(document.querySelector('.modal-overlay.active'))
+}) : null;
+
+let pollTimer = null;
+const pollNow = () => v2.poll().catch((e) => console.warn('[cloud-sync] poll failed:', e));
+
+async function startV2() {
+  try {
+    await v2.load();
+  } catch (e) {
+    console.error('[cloud-sync] v2 load failed:', e);
+    cloud.lastError = e.message || String(e);
+    if (hasUnsaved()) {
+      cloud.status = 'save-failed';
+      cloud.lastSaveError = cloud.lastError;
+    } else {
+      cloud.status = 'error';
+    }
+    renderAuthUI();
+    return;
+  }
+  if (!pollTimer) {
+    pollTimer = setInterval(pollNow, POLL_MS);
+    window.addEventListener('focus', pollNow);
+  }
+}
+
+function stopV2() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  window.removeEventListener('focus', pollNow);
+}
+
 function hasUnsaved() {
   if (cloud.status === 'save-failed') return true;
   try { return localStorage.getItem('nickos_unsaved') === '1'; } catch (_) { return false; }
@@ -194,7 +259,15 @@ onAuthStateChanged(auth, async (user) => {
   // Tear down any previous listener.
   if (cloud.unsubscribe) { cloud.unsubscribe(); cloud.unsubscribe = null; }
 
+  if (!user && backend.devToken) {
+    // Local testing only: resolveBackend() ignores devToken anywhere but localhost.
+    cloud.user = { uid: 'dev' };
+    await startV2();
+    return;
+  }
+
   if (!user) {
+    if (v2) stopV2();
     cloud.status = 'signed-out';
     renderAuthUI();
     return;
@@ -202,6 +275,8 @@ onAuthStateChanged(auth, async (user) => {
 
   if (cloud.status !== 'save-failed') cloud.status = 'syncing';
   renderAuthUI();
+
+  if (v2) { await startV2(); return; }
 
   const stateRef = doc(db, 'users', user.uid, 'state', 'current');
 

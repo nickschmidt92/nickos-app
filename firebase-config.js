@@ -11,3 +11,8 @@ export const firebaseConfig = {
   messagingSenderId: "969317292382",
   appId: "1:969317292382:web:4705bbbd4d50665a6a57cf"
 };
+
+// Which backend the web app talks to. 'v1' writes to the Firestore document as it always
+// has. Flipping to 'v2' is a step in the cutover runbook, with apiBase set to the deployed
+// API. Login stays on the project above either way (D-0220).
+export const backend = { mode: 'v2', apiBase: 'https://api-suqfofvrla-uw.a.run.app' };
