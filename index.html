@@ -2483,6 +2483,7 @@
             const followup = document.getElementById('reviewFollowup').value;
 
             appState.reviews.push({
+                title: `Weekly review ${new Date().toISOString().split('T')[0]}`,
                 date: new Date().toISOString().split('T')[0],
                 summary,
                 followup
@@ -2709,15 +2710,15 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             const decision = decisionId ? appState.decisions.find(d => d.id === decisionId) : null;
 
             document.getElementById('decisionModalTitle').textContent = decision ? 'Edit Decision' : 'New Decision';
-            document.getElementById('decisionTitle').value = decision?.title || '';
+            document.getElementById('decisionTitle').value = decision?.title || decision?.decision || '';
             document.getElementById('decisionFolder').value = decision?.folder || 'LIFE';
             document.getElementById('decisionStatus').value = decision?.status || 'PROPOSED';
             document.getElementById('decisionDate').value = decision?.date || new Date().toISOString().split('T')[0];
             document.getElementById('decisionProject').value = decision?.projectId || linkedProjectId || '';
-            document.getElementById('decisionWhy').value = decision?.why || '';
+            document.getElementById('decisionWhy').value = decision?.why || decision?.rationale || '';
             document.getElementById('decisionAssumptions').value = decision?.assumptions || '';
             document.getElementById('decisionRisks').value = decision?.risks || '';
-            document.getElementById('decisionWhatWouldChange').value = decision?.whatWouldChange || '';
+            document.getElementById('decisionWhatWouldChange').value = decision?.whatWouldChange || decision?.whatWouldChangeIt || '';
 
             document.getElementById('decisionModal').classList.add('active');
         }
@@ -2904,36 +2905,30 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
                 return;
             }
 
-            let results = [];
+            // Records can lack a title (12 decisions do), and one bad record must not stop the search.
+            const matches = (...fields) => fields.some(f => typeof f === 'string' && f.toLowerCase().includes(query));
+            const results = [];
 
             appState.tasks.forEach(t => {
-                if (t.title.toLowerCase().includes(query) || (t.originalText && t.originalText.toLowerCase().includes(query))) {
-                    results.push({ type: 'task', item: t });
-                }
+                if (matches(t.id, t.title, t.originalText)) results.push({ type: 'task', item: t });
             });
 
             appState.projects.forEach(p => {
-                if (p.title.toLowerCase().includes(query)) {
-                    results.push({ type: 'project', item: p });
-                }
+                if (matches(p.id, p.code, p.title)) results.push({ type: 'project', item: p });
             });
 
             appState.decisions.forEach(d => {
-                if (d.title.toLowerCase().includes(query)) {
-                    results.push({ type: 'decision', item: d });
-                }
+                if (matches(d.id, d.title, d.decision, d.summary)) results.push({ type: 'decision', item: d });
             });
 
             appState.docs.forEach(d => {
-                if (d.title.toLowerCase().includes(query)) {
-                    results.push({ type: 'doc', item: d });
-                }
+                if (matches(d.id, d.title)) results.push({ type: 'doc', item: d });
             });
 
             const html = results.slice(0, 20).map(r => `
                 <div class="search-result-item" style="cursor:pointer;" onclick="selectSearchResult('${r.type}', '${escapeHtml(r.item.id)}')">
-                    <div class="search-result-title">${escapeHtml(r.item.title)}</div>
-                    <div class="search-result-meta">${r.type.toUpperCase()} • ${escapeHtml(r.item.folder)}</div>
+                    <div class="search-result-title">${escapeHtml(r.item.title || r.item.decision || r.item.summary || r.item.id)}</div>
+                    <div class="search-result-meta">${r.type.toUpperCase()} • ${escapeHtml(r.item.id)}${r.item.folder ? ' • ' + escapeHtml(r.item.folder) : ''}</div>
                 </div>
             `).join('');
 
