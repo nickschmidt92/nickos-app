@@ -85,6 +85,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   let pushing = false;
   let again = false;
   let loaded = false;
+  let preLoad = null;
 
   const status = (s, err) => onStatus(s, err || null);
   const hasUnsaved = () => { try { return storage.getItem(UNSAVED) === '1'; } catch (_) { return false; } };
@@ -132,12 +133,15 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
    * stays and is retried against the base it was made from. If that base was lost a
    * diff can't be trusted, so the local copy is set aside and the server's is used.
    */
+  const entitiesNow = () => { const st = getState(); return JSON.stringify(ENTITIES.map((e) => st[e])); };
+
   async function load() {
+    let setAside = false;
     // Stay red with unsaved work: the red pill is what lets Nick retry if this fails.
     if (!hasUnsaved()) status('syncing');
     // Taken before the wait: a change by the time /all answers is an edit made during load.
-    const entitiesNow = () => { const st = getState(); return JSON.stringify(ENTITIES.map((e) => st[e])); };
-    const atStart = entitiesNow();
+    // Kept across failed attempts: edits made during an outage count too.
+    if (preLoad === null) preLoad = entitiesNow();
     const body = await call('GET', '/all');
     writable = Object.fromEntries(ENTITIES.map((e) => [e, new Set(body.writable[e] || [])]));
     if (hasUnsaved()) {
@@ -156,6 +160,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
       } catch (_) {}
       log.warn('[v2-sync] unsaved edits had no base; local copy kept in', ORPHAN);
       clearUnsaved();
+      setAside = true;
     }
     // An empty answer with a full local copy means the wrong target, not an empty life.
     const serverHolds = ENTITIES.some((e) => (body.data[e] || []).length);
@@ -165,8 +170,8 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     }
     // push() can't send before a base exists, and applyAll would overwrite the edit, so
     // keep the local copy and say so rather than dropping it silently.
-    const editedDuringLoad = entitiesNow() !== atStart;
-    if (editedDuringLoad) {
+    if (!setAside && entitiesNow() !== preLoad) {
+      setAside = true;
       try {
         const st = getState();
         storage.setItem(ORPHAN, JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, st[e]]))));
@@ -175,7 +180,8 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     }
     applyAll(body);
     loaded = true;
-    if (editedDuringLoad) status('save-failed', 'An edit made while loading was not saved. Please enter it again.');
+    preLoad = null;
+    if (setAside) status('save-failed', 'Earlier edits were not saved. Please check them and enter them again.');
     else status('signed-in');
     render();
   }
@@ -324,14 +330,21 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   async function poll() {
     if (!loaded || pushing || hasUnsaved() || isBusy()) return;
     const state = getState();
-    for (const e of ENTITIES) {
-      if (!Array.isArray(state[e])) continue;
+    const edited = () => ENTITIES.some((e) => {
+      if (!Array.isArray(state[e])) return false;
       const d = diffEntity(base[e], state[e], writable[e]);
-      if (d.creates.length || d.updates.length || d.deletes.length) return;
-    }
+      return d.creates.length || d.updates.length || d.deletes.length;
+    });
+    // Checked again after each wait: an edit made meanwhile must not be replaced. since
+    // stays put, so the next poll fetches the same changes.
+    const standDown = () => pushing || hasUnsaved() || isBusy() || edited();
+    if (edited()) return;
     const body = await call('GET', `/changes?since=${encodeURIComponent(since)}`);
+    if (standDown()) return;
     if (body.hasMore) {
-      applyAll(await call('GET', '/all'));
+      const all = await call('GET', '/all');
+      if (standDown()) return;
+      applyAll(all);
       render();
       return;
     }
