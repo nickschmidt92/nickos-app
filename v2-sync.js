@@ -135,6 +135,9 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   async function load() {
     // Stay red with unsaved work: the red pill is what lets Nick retry if this fails.
     if (!hasUnsaved()) status('syncing');
+    // Taken before the wait: a change by the time /all answers is an edit made during load.
+    const entitiesNow = () => { const st = getState(); return JSON.stringify(ENTITIES.map((e) => st[e])); };
+    const atStart = entitiesNow();
     const body = await call('GET', '/all');
     writable = Object.fromEntries(ENTITIES.map((e) => [e, new Set(body.writable[e] || [])]));
     if (hasUnsaved()) {
@@ -160,9 +163,20 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     if (!serverHolds && ENTITIES.some((e) => (state[e] || []).length)) {
       throw new Error('The server returned no records. Keeping the local copy and not syncing.');
     }
+    // push() can't send before a base exists, and applyAll would overwrite the edit, so
+    // keep the local copy and say so rather than dropping it silently.
+    const editedDuringLoad = entitiesNow() !== atStart;
+    if (editedDuringLoad) {
+      try {
+        const st = getState();
+        storage.setItem(ORPHAN, JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, st[e]]))));
+      } catch (_) {}
+      log.warn('[v2-sync] edit made during load set aside in', ORPHAN);
+    }
     applyAll(body);
     loaded = true;
-    status('signed-in');
+    if (editedDuringLoad) status('save-failed', 'An edit made while loading was not saved. Please enter it again.');
+    else status('signed-in');
     render();
   }
 
