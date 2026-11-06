@@ -30,7 +30,7 @@ import {
 
 import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js";
 import { mergeById } from "./merge-by-id.js";
-import { createV2Sync, resolveBackend } from "./v2-sync.js?v=13";
+import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=14";
 
 const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
 const POLL_MS = 60000;
@@ -226,7 +226,7 @@ const v2 = backend.mode === 'v2' ? createV2Sync({
     if (typeof window.render !== 'function') return;
     try { window.render(); } catch (e) { console.error('[cloud-sync] render after sync failed:', e); }
   },
-  isBusy: () => Boolean(document.querySelector('.modal-overlay.active')),
+  isBusy: () => Boolean(window.nickosTabLocked || document.querySelector('.modal-overlay.active')),
   saveLocal: () => { if (rawSaveLocal) rawSaveLocal(); }
 }) : null;
 
@@ -239,13 +239,38 @@ const localCopyReady = !v2 ? Promise.resolve() : new Promise((resolve) => {
   else window.addEventListener('nickos-local-copy', ready, { once: true });
 });
 
+if (v2) cloud.getRecord = (entity, id) => v2.getRecord(entity, id);
+
 let pollTimer = null;
 const pollNow = () => v2.poll().catch((e) => console.warn('[cloud-sync] poll failed:', e));
+if (v2) {
+  window.addEventListener('online', retryLoadNow);
+  document.addEventListener('visibilitychange', retryLoadNow);
+}
+
+let loadRetryTimer = null;
+let loadAttempts = 0;
+let loadRunning = false;
+
+function clearLoadRetry() {
+  if (loadRetryTimer) { clearTimeout(loadRetryTimer); loadRetryTimer = null; }
+}
+
+// Coming back online or to the app is the moment a failed load is most likely to work.
+function retryLoadNow() {
+  if (window.nickosTabLocked || !cloud.user || loadRunning || !v2 || v2.loaded || cloud.status === 'not-authorized') return;
+  if (document.visibilityState === 'hidden') return;
+  startV2();
+}
 
 async function startV2() {
+  if (loadRunning || window.nickosTabLocked) return;
+  loadRunning = true;
+  clearLoadRetry();
   await localCopyReady;
   try {
     await v2.load();
+    loadAttempts = 0;
   } catch (e) {
     console.error('[cloud-sync] v2 load failed:', e);
     cloud.lastError = e.message || String(e);
@@ -253,10 +278,14 @@ async function startV2() {
       cloud.status = 'save-failed';
       cloud.lastSaveError = cloud.lastError;
     } else {
-      cloud.status = 'error';
+      cloud.status = isNotAuthorized(e) ? 'not-authorized' : 'error';
     }
+    // A rejected login won't fix itself; anything else might, so keep trying.
+    if (!isNotAuthorized(e)) loadRetryTimer = setTimeout(startV2, retryDelayMs(loadAttempts++));
     renderAuthUI();
     return;
+  } finally {
+    loadRunning = false;
   }
   if (!pollTimer) {
     pollTimer = setInterval(pollNow, POLL_MS);
@@ -265,9 +294,56 @@ async function startV2() {
 }
 
 function stopV2() {
+  clearLoadRetry();
+  loadAttempts = 0;
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   window.removeEventListener('focus', pollNow);
   localCopyReady.then(() => v2.signedOut());
+}
+
+// Edits the sync couldn't save. Nothing here writes to NickOS: Nick reads them and re-enters
+// what he still wants. Text goes in through textContent, because it's record data.
+function showSetAside() {
+  document.getElementById('nickos-setaside')?.remove();
+  const list = v2.setAsideEdits();
+  if (!list.length) { renderAuthUI(); return; }
+  const panel = document.createElement('div');
+  panel.id = 'nickos-setaside';
+  panel.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,0.75);overflow:auto;padding:24px;font:14px/1.4 -apple-system,system-ui,sans-serif;color:#e5e7eb;';
+  const add = (parent, tag, text, css) => {
+    const el = document.createElement(tag);
+    if (text) el.textContent = text;
+    if (css) el.style.cssText = css;
+    parent.appendChild(el);
+    return el;
+  };
+  const box = add(panel, 'div', '', 'max-width:640px;margin:0 auto;background:#141414;border:1px solid #2a2a2a;border-radius:12px;padding:16px;');
+  add(box, 'h3', 'Edits set aside', 'margin:0 0 8px;');
+  add(box, 'p', 'These were not saved to NickOS. Re-enter anything you still want.', 'margin:0 0 12px;opacity:0.8;');
+  const btn = 'margin-right:8px;padding:6px 10px;border-radius:6px;border:1px solid #444;background:#222;color:#e5e7eb;cursor:pointer;';
+  list.forEach((entry, i) => {
+    const row = add(box, 'div', '', 'border-top:1px solid #2a2a2a;padding:10px 0;');
+    add(row, 'div', entry.reason || 'Edits', 'font-weight:600;');
+    const ids = Object.values(entry.data || {}).flat().map((r) => r && (r.id || r.title)).filter(Boolean);
+    add(row, 'div', `${entry.at ? new Date(entry.at).toLocaleString() : 'Earlier'} · ${ids.length} record(s): ${ids.slice(0, 12).join(', ')}${ids.length > 12 ? '…' : ''}`, 'font-size:12px;opacity:0.8;margin:4px 0 8px;');
+    const dl = add(row, 'button', 'Download', btn);
+    dl.onclick = () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(entry, null, 2)], { type: 'application/json' }));
+      a.download = `nickos-set-aside-${i + 1}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+    const drop = add(row, 'button', 'Dismiss', btn);
+    drop.onclick = () => {
+      if (!confirm('Dismiss these edits? They were never saved, so this removes the only copy.')) return;
+      v2.dismissSetAside(i);
+      showSetAside();
+      renderAuthUI();
+    };
+  });
+  add(box, 'button', 'Close', `${btn}margin-top:8px;`).onclick = () => panel.remove();
+  document.body.appendChild(panel);
 }
 
 function hasUnsaved() {
@@ -436,14 +512,25 @@ function renderAuthUI() {
       inner = `${dot('#ef4444')} <span style="line-height:1.3;">Not saved — tap to retry${cloud.lastSaveError ? `<br><span style="font-weight:400;opacity:0.8;display:block;max-width:70vw;max-height:4.2em;overflow:hidden;">${escapeHtml(cloud.lastSaveError)}</span>` : ''}</span>`;
       break;
     case 'error':
-      inner = `${dot('#ef4444')} <span title="${(cloud.lastError||'').replace(/"/g,'&quot;')}">Offline</span> <button id="cloud-signin-btn" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Retry</button>`;
+      // v2's Retry reloads the data. Signing in again wouldn't fix a failed load, and on a
+      // phone it would leave the app.
+      inner = `${dot('#ef4444')} <span title="${(cloud.lastError||'').replace(/"/g,'&quot;')}">Offline</span> <button id="${v2 && cloud.user ? 'cloud-retry-btn' : 'cloud-signin-btn'}" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Retry</button>`;
+      break;
+    case 'not-authorized':
+      inner = `${dot('#ef4444')} <span style="line-height:1.3;">Not authorized. Wrong Apple account?</span> <button id="cloud-signout-btn" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Sign out</button>`;
       break;
   }
+  const parked = v2 ? v2.setAsideEdits().length : 0;
+  if (parked) inner += ` <button id="cloud-setaside-btn" style="all:unset;cursor:pointer;text-decoration:underline;font-size:11px;">${parked} set aside</button>`;
   host.innerHTML = inner;
+  const parkedEl = document.getElementById('cloud-setaside-btn');
+  if (parkedEl) parkedEl.addEventListener('click', (e) => { e.stopPropagation(); showSetAside(); });
 
   const inEl  = document.getElementById('cloud-signin-btn');
   const outEl = document.getElementById('cloud-signout-btn');
   if (inEl)  inEl.addEventListener('click', () => cloud.signIn());
+  const retryEl = document.getElementById('cloud-retry-btn');
+  if (retryEl) retryEl.addEventListener('click', () => startV2());
   if (outEl) outEl.addEventListener('click', () => cloud.signOut());
   // The save-failed pill is itself the retry control; other states ignore pill clicks.
   host.onclick = () => { if (cloud.status === 'save-failed' && !cloud.pushing) cloud.retryUnsaved(); };
