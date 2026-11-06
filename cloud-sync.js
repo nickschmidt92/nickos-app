@@ -34,6 +34,8 @@ import { createV2Sync, resolveBackend } from "./v2-sync.js";
 
 const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
 const POLL_MS = 60000;
+let rawSaveLocal = null; // saveToLocalStorage without the push, set when it's wrapped below
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // Every entity the API can write — NOT just the six this UI renders.
 //
@@ -148,7 +150,19 @@ const cloud = {
     if (!cloud.user || !window.appState) return;
     if (v2) {
       cloud.pushing = true;
-      try { await v2.retry(); } finally { cloud.pushing = false; }
+      try {
+        await v2.retry();
+        if (v2.massDeletes.length) {
+          const list = v2.massDeletes.map((m) => `${m.count} ${m.entity}:\n${m.titles.slice(0, 8).join('\n')}${m.count > 8 ? `\n…and ${m.count - 8} more` : ''}`).join('\n\n');
+          const ok = window.confirm(`These records are missing from this device.\n\n${list}\n\nOK deletes them everywhere. Cancel keeps them and puts them back.`);
+          if (ok) {
+            await v2.confirmMassDelete();
+          } else {
+            v2.restoreMassDelete();
+            await v2.retry();
+          }
+        }
+      } finally { cloud.pushing = false; }
       return;
     }
     cloud.pushing = true; // covers the read and the push, so taps can't pile up
@@ -212,13 +226,23 @@ const v2 = backend.mode === 'v2' ? createV2Sync({
     if (typeof window.render !== 'function') return;
     try { window.render(); } catch (e) { console.error('[cloud-sync] render after sync failed:', e); }
   },
-  isBusy: () => Boolean(document.querySelector('.modal-overlay.active'))
+  isBusy: () => Boolean(document.querySelector('.modal-overlay.active')),
+  saveLocal: () => { if (rawSaveLocal) rawSaveLocal(); }
 }) : null;
+
+// The app loads its local copy on DOMContentLoaded, and this listener runs after that one.
+// Sync must not start earlier: an empty boot copy would make every local record look new.
+const localCopyReady = !v2 ? Promise.resolve() : new Promise((resolve) => {
+  const ready = () => { v2.captureBoot(); resolve(); };
+  if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', ready);
+  else ready();
+});
 
 let pollTimer = null;
 const pollNow = () => v2.poll().catch((e) => console.warn('[cloud-sync] poll failed:', e));
 
 async function startV2() {
+  await localCopyReady;
   try {
     await v2.load();
   } catch (e) {
@@ -242,6 +266,7 @@ async function startV2() {
 function stopV2() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   window.removeEventListener('focus', pollNow);
+  localCopyReady.then(() => v2.signedOut());
 }
 
 function hasUnsaved() {
@@ -406,7 +431,8 @@ function renderAuthUI() {
       inner = `${dot('#10b981')} <span>Synced</span> <button id="cloud-signout-btn" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Sign out</button>`;
       break;
     case 'save-failed':
-      inner = `${dot('#ef4444')} <span title="${(cloud.lastSaveError||'').replace(/"/g,'&quot;')}">Not saved — tap to retry</span>`;
+      // Written out, not a tooltip: a phone never shows a tooltip.
+      inner = `${dot('#ef4444')} <span style="line-height:1.3;">Not saved — tap to retry${cloud.lastSaveError ? `<br><span style="font-weight:400;opacity:0.8;display:block;max-width:70vw;max-height:4.2em;overflow:hidden;">${escapeHtml(cloud.lastSaveError)}</span>` : ''}</span>`;
       break;
     case 'error':
       inner = `${dot('#ef4444')} <span title="${(cloud.lastError||'').replace(/"/g,'&quot;')}">Offline</span> <button id="cloud-signin-btn" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Retry</button>`;
@@ -433,8 +459,10 @@ renderAuthUI();
   const tryPatch = () => {
     if (typeof window.saveToLocalStorage === 'function' && !window.saveToLocalStorage.__cloudPatched) {
       const original = window.saveToLocalStorage;
+      rawSaveLocal = original;
       window.saveToLocalStorage = function patched(...args) {
         const r = original.apply(this, args);
+        if (v2) v2.noteEdit(); // covers signed out and not loaded, where nothing below sends
         // Unsaved: save locally only and keep the pill red. A push here (autosave
         // or any edit) would replace the server's arrays with the stale local copy
         // and delete server-only records; only retryUnsaved() may push now.
