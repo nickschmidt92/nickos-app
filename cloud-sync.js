@@ -30,7 +30,7 @@ import {
 
 import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js";
 import { mergeById } from "./merge-by-id.js";
-import { createV2Sync, resolveBackend } from "./v2-sync.js";
+import { createV2Sync, resolveBackend } from "./v2-sync.js?v=13";
 
 const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
 const POLL_MS = 60000;
@@ -230,12 +230,13 @@ const v2 = backend.mode === 'v2' ? createV2Sync({
   saveLocal: () => { if (rawSaveLocal) rawSaveLocal(); }
 }) : null;
 
-// The app loads its local copy on DOMContentLoaded, and this listener runs after that one.
-// Sync must not start earlier: an empty boot copy would make every local record look new.
+// Sync must not start until the app has loaded its local copy: an empty boot copy would make
+// every local record look new. Don't use readyState for this: a module script runs while it's
+// already 'interactive', before DOMContentLoaded and so before the copy is loaded.
 const localCopyReady = !v2 ? Promise.resolve() : new Promise((resolve) => {
   const ready = () => { v2.captureBoot(); resolve(); };
-  if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', ready);
-  else ready();
+  if (window.nickosLocalCopyLoaded) ready();
+  else window.addEventListener('nickos-local-copy', ready, { once: true });
 });
 
 let pollTimer = null;

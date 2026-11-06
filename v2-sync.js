@@ -19,6 +19,7 @@ const BATCH = 50;
 const MAX_PASSES = 3;
 const POLL_OVERLAP_MS = 5000;
 export const MASS_DELETE_LIMIT = 20;
+export const MASS_CREATE_LIMIT = 20;
 const UNSAVED = 'nickos_unsaved';
 const BASE = 'nickos_v2_base';
 const ORPHAN = 'nickos_v2_orphan';
@@ -366,6 +367,13 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     for (const e of ENTITIES) {
       if (!Array.isArray(state[e])) continue;
       const first = diffEntity(base[e], state[e], writable[e]);
+      // Nobody adds this many records by hand: it means the comparison copy is wrong, and
+      // sending them would duplicate everything. Refused outright; no tap can approve it.
+      if (first.creates.length > MASS_CREATE_LIMIT) {
+        failures.push(`Refusing to create ${first.creates.length} ${e} at once. Nothing was sent.`);
+        first.creates.forEach((item) => unsent.add(item.id));
+        continue;
+      }
       for (const item of first.creates) {
         if (pointsAtUnsent(item)) { failures.push(`${item.id}: its project wasn't saved`); unsent.add(item.id); continue; }
         try {
