@@ -374,6 +374,9 @@
         .status-blocked { background-color: #be123c; color: #fff; }
         .status-done { background-color: #059669; color: #fff; }
         .status-archived { background-color: #475569; color: #fff; }
+        .status-in_progress { background-color: #dc2626; color: #fff; }
+        .status-dropped { background-color: #475569; color: #fff; }
+        .status-completed { background-color: #059669; color: #fff; }
 
         .priority-p0 { background-color: #dc2626; color: #fff; }
         .priority-p1 { background-color: #d97706; color: #fff; }
@@ -1188,12 +1191,11 @@
                         <label class="form-label">Status</label>
                         <select id="taskStatus">
                             <option value="INBOX">Inbox</option>
-                            <option value="TODAY">Today</option>
                             <option value="NEXT">Next</option>
+                            <option value="IN_PROGRESS">In Progress</option>
                             <option value="WAITING">Waiting</option>
-                            <option value="BLOCKED">Blocked</option>
                             <option value="DONE">Done</option>
-                            <option value="ARCHIVED">Archived</option>
+                            <option value="DROPPED">Dropped</option>
                         </select>
                     </div>
                 </div>
@@ -1279,9 +1281,10 @@
                         <label class="form-label">Status</label>
                         <select id="projectStatus">
                             <option value="ACTIVE">Active</option>
-                            <option value="ON_HOLD">On Hold</option>
-                            <option value="DONE">Done</option>
-                            <option value="ARCHIVED">Archived</option>
+                            <option value="PLANNED">Planned</option>
+                            <option value="SOMEDAY">Someday</option>
+                            <option value="COMPLETED">Completed</option>
+                            <option value="DROPPED">Dropped</option>
                         </select>
                     </div>
                 </div>
@@ -1320,10 +1323,12 @@
                     <div class="form-group">
                         <label class="form-label">Status</label>
                         <select id="decisionStatus">
-                            <option value="PROPOSED">Proposed</option>
-                            <option value="AGREED">Agreed</option>
-                            <option value="IMPLEMENTED">Implemented</option>
-                            <option value="REVERSED">Reversed</option>
+                            <option value="">No status</option>
+                            <option value="DECIDED">Decided</option>
+                            <option value="ACTIVE">Active</option>
+                            <option value="DONE">Done</option>
+                            <option value="COMPLETED">Completed</option>
+                            <option value="DROPPED">Dropped</option>
                         </select>
                     </div>
                 </div>
@@ -1440,6 +1445,7 @@
                     <select id="blockerStatus">
                         <option value="OPEN">Open</option>
                         <option value="RESOLVED">Resolved</option>
+                        <option value="DROPPED">Dropped</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -1628,18 +1634,18 @@
 
             // Stats
             const inbox = tasks.filter(t => t.status === 'INBOX');
-            const today = tasks.filter(t => t.status === 'TODAY').sort((a,b) => ({'P0':0,'P1':1,'P2':2,'P3':3}[a.priority]||3) - ({'P0':0,'P1':1,'P2':2,'P3':3}[b.priority]||3));
+            const today = tasks.filter(t => t.status === 'IN_PROGRESS').sort((a,b) => ({'P0':0,'P1':1,'P2':2,'P3':3}[a.priority]||3) - ({'P0':0,'P1':1,'P2':2,'P3':3}[b.priority]||3));
             const next = tasks.filter(t => t.status === 'NEXT');
             const waiting = tasks.filter(t => t.status === 'WAITING');
             const blocked = tasks.filter(t => t.status === 'BLOCKED');
             const done = tasks.filter(t => t.status === 'DONE');
-            const active = tasks.filter(t => ['INBOX','TODAY','NEXT','WAITING','BLOCKED'].includes(t.status));
+            const active = tasks.filter(t => ['INBOX','IN_PROGRESS','NEXT','WAITING'].includes(t.status));
             const nowStr = new Date().toISOString().split('T')[0];
-            const overdue = tasks.filter(t => t.dueDate && t.dueDate < nowStr && !['DONE','ARCHIVED'].includes(t.status));
+            const overdue = tasks.filter(t => t.dueDate && t.dueDate < nowStr && !['DONE','DROPPED','COMPLETED'].includes(t.status));
             const weekAgo = new Date(Date.now() - 7*24*60*60*1000);
             const doneThisWeek = done.filter(t => t.completedDate && new Date(t.completedDate) >= weekAgo);
             const stale = tasks.filter(t => {
-                if (['DONE','ARCHIVED'].includes(t.status)) return false;
+                if (['DONE','DROPPED','COMPLETED'].includes(t.status)) return false;
                 const lastTouch = t.lastTouchedDate || t.createdDate || t.created;
                 if (!lastTouch) return false;
                 return (Date.now() - new Date(lastTouch).getTime()) > 30*24*60*60*1000;
@@ -1649,7 +1655,7 @@
             // Folder breakdown
             const folderCounts = {};
             tasks.forEach(t => {
-                if (['DONE','ARCHIVED'].includes(t.status)) return;
+                if (['DONE','DROPPED','COMPLETED'].includes(t.status)) return;
                 folderCounts[t.folder] = (folderCounts[t.folder] || 0) + 1;
             });
             const topFolders = Object.entries(folderCounts).sort((a,b) => b[1] - a[1]).slice(0, 10);
@@ -1690,9 +1696,9 @@
                         <div class="stat-value" style="color:#a78bfa;">${inbox.length}</div>
                         <div class="stat-label">Inbox</div>
                     </div>
-                    <div class="stat-card" style="cursor:pointer;" onclick="appState.taskFilters.status='TODAY';navigateTo('tasks');">
+                    <div class="stat-card" style="cursor:pointer;" onclick="appState.taskFilters.status='IN_PROGRESS';navigateTo('tasks');">
                         <div class="stat-value" style="color:#60a5fa;">${today.length}</div>
-                        <div class="stat-label">Today</div>
+                        <div class="stat-label">In Progress</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-value">${next.length + waiting.length}</div>
@@ -1718,7 +1724,7 @@
             if (total > 0) {
                 const segments = [
                     {status:'INBOX', count:inbox.length, color:'#a78bfa'},
-                    {status:'TODAY', count:today.length, color:'#60a5fa'},
+                    {status:'IN_PROGRESS', count:today.length, color:'#60a5fa'},
                     {status:'NEXT', count:next.length, color:'#34d399'},
                     {status:'WAITING', count:waiting.length, color:'#fbbf24'},
                     {status:'BLOCKED', count:blocked.length, color:'#f87171'},
@@ -1840,7 +1846,7 @@
             const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
             return {
-                totalActive: appState.tasks.filter(t => ['INBOX', 'TODAY', 'NEXT', 'WAITING'].includes(t.status)).length,
+                totalActive: appState.tasks.filter(t => ['INBOX', 'IN_PROGRESS', 'NEXT', 'WAITING'].includes(t.status)).length,
                 doneThisWeek: appState.tasks.filter(t => t.status === 'DONE' && new Date(t.completedDate) >= weekAgo).length
             };
         }
@@ -1855,13 +1861,13 @@
         function getOverdueTasks() {
             const now = new Date().toISOString().split('T')[0];
             return appState.tasks.filter(t =>
-                t.dueDate && t.dueDate < now && !['DONE', 'ARCHIVED'].includes(t.status)
+                t.dueDate && t.dueDate < now && !['DONE', 'DROPPED', 'COMPLETED'].includes(t.status)
             );
         }
 
         function getQuickWins() {
             return appState.tasks.filter(t =>
-                t.effort === 'S' && t.impact === 'H' && !['DONE', 'ARCHIVED'].includes(t.status)
+                t.effort === 'S' && t.impact === 'H' && !['DONE', 'DROPPED', 'COMPLETED'].includes(t.status)
             );
         }
 
@@ -1887,18 +1893,16 @@
                             onclick="setTaskFilter('status', null)">All</button>
                         <button class="filter-button ${appState.taskFilters.status === 'INBOX' ? 'active' : ''}"
                             onclick="setTaskFilter('status', 'INBOX')">Inbox</button>
-                        <button class="filter-button ${appState.taskFilters.status === 'TODAY' ? 'active' : ''}"
-                            onclick="setTaskFilter('status', 'TODAY')">Today</button>
+                        <button class="filter-button ${appState.taskFilters.status === 'IN_PROGRESS' ? 'active' : ''}"
+                            onclick="setTaskFilter('status', 'IN_PROGRESS')">In Progress</button>
                         <button class="filter-button ${appState.taskFilters.status === 'NEXT' ? 'active' : ''}"
                             onclick="setTaskFilter('status', 'NEXT')">Next</button>
                         <button class="filter-button ${appState.taskFilters.status === 'WAITING' ? 'active' : ''}"
                             onclick="setTaskFilter('status', 'WAITING')">Waiting</button>
-                        <button class="filter-button ${appState.taskFilters.status === 'BLOCKED' ? 'active' : ''}"
-                            onclick="setTaskFilter('status', 'BLOCKED')">Blocked</button>
                         <button class="filter-button ${appState.taskFilters.status === 'DONE' ? 'active' : ''}"
                             onclick="setTaskFilter('status', 'DONE')">Done</button>
-                        <button class="filter-button ${appState.taskFilters.status === 'ARCHIVED' ? 'active' : ''}"
-                            onclick="setTaskFilter('status', 'ARCHIVED')">Archived</button>
+                        <button class="filter-button ${appState.taskFilters.status === 'DROPPED' ? 'active' : ''}"
+                            onclick="setTaskFilter('status', 'DROPPED')">Dropped</button>
                     </div>
                 </div>
 
@@ -1927,7 +1931,7 @@
             if (appState.selectedTasks.length > 0) {
                 html += `<div style="background:#1e1e3a;padding:10px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                     <span style="font-weight:600;color:#a78bfa;">${appState.selectedTasks.length} selected</span>
-                    <button class="btn small" onclick="batchChangeStatus('TODAY')">→ Today</button>
+                    <button class="btn small" onclick="batchChangeStatus('IN_PROGRESS')">→ In Progress</button>
                     <button class="btn small" onclick="batchChangeStatus('NEXT')">→ Next</button>
                     <button class="btn small" onclick="batchChangeStatus('DONE')">✓ Done</button>
                     <button class="btn small" onclick="batchChangePriority('P0')">P0</button>
@@ -2035,7 +2039,7 @@
         }
 
         function renderBoardView(tasks) {
-            const statuses = ['INBOX', 'TODAY', 'NEXT', 'WAITING', 'BLOCKED', 'DONE'];
+            const statuses = ['INBOX', 'IN_PROGRESS', 'NEXT', 'WAITING', 'DONE'];
             let html = '<div class="board-container">';
 
             for (const status of statuses) {
@@ -2118,7 +2122,7 @@
             } else {
                 html += `<div class="filter-bar">
                     <div class="filter-group">
-                        ${[null, 'ACTIVE', 'ON_HOLD', 'DONE', 'ARCHIVED'].map(status => `
+                        ${[null, 'ACTIVE', 'PLANNED', 'SOMEDAY', 'COMPLETED', 'DROPPED'].map(status => `
                             <button class="filter-button ${projStatusFilter === status ? 'active' : ''}"
                                 onclick="appState.projectStatusFilter=${status === null ? 'null' : '\'' + status + '\''};render();">
                                 ${status || 'All'}
@@ -2151,7 +2155,7 @@
 
             let html = `<div class="filter-bar">
                 <div class="filter-group">
-                    ${[null, 'PROPOSED', 'AGREED', 'IMPLEMENTED', 'REVERSED'].map(status => `
+                    ${[null, 'DECIDED', 'ACTIVE', 'DONE', 'COMPLETED', 'DROPPED'].map(status => `
                         <button class="filter-button ${decStatusFilter === status ? 'active' : ''}"
                             onclick="appState.decisionStatusFilter=${status === null ? 'null' : '\'' + status + '\''};render();">
                             ${status || 'All'}
@@ -2179,7 +2183,7 @@
                                 <div style="font-weight:600;">${escapeHtml(d.title)}</div>
                                 <div class="text-sm" style="margin-top:4px;">
                                     <span class="folder-badge">${escapeHtml(d.folder)}</span>
-                                    <span class="status-badge status-${d.status.toLowerCase()}">${d.status}</span>
+                                    ${d.status ? `<span class="status-badge status-${d.status.toLowerCase()}">${d.status}</span>` : ''}
                                     ${d.date ? '<span class="badge">' + d.date + '</span>' : ''}
                                 </div>
                                 ${d.why ? '<div class="text-sm text-muted" style="margin-top:6px;">' + escapeHtml(d.why).substring(0, 150) + '</div>' : ''}
@@ -2238,7 +2242,7 @@
                                 ${decisions.map(d => `
                                     <div class="linked-item">
                                         <span>${escapeHtml(d.title)}</span>
-                                        <span class="status-badge status-${d.status.toLowerCase()}">${d.status}</span>
+                                        ${d.status ? `<span class="status-badge status-${d.status.toLowerCase()}">${d.status}</span>` : ''}
                                     </div>
                                 `).join('')}
                             </div>
@@ -2335,11 +2339,11 @@
                         </div>
 
                         <div class="flex gap-2">
-                            <button class="btn primary" onclick="triageAction('TODAY')">📌 Today</button>
+                            <button class="btn primary" onclick="triageAction('IN_PROGRESS')">📌 In Progress</button>
                             <button class="btn primary" onclick="triageAction('NEXT')">→ Next</button>
                             <button class="btn primary" onclick="triageAction('WAITING')">⏳ Waiting</button>
                             <button class="btn" onclick="triageAction('DEFER')">📦 Defer (Next/P3)</button>
-                            <button class="btn" onclick="triageAction('ARCHIVED')">Archive</button>
+                            <button class="btn" onclick="triageAction('DROPPED')">Drop</button>
                             <button class="btn danger" onclick="triageAction('DELETE')">Delete</button>
                         </div>
                     </div>
@@ -2460,7 +2464,7 @@
 
             const folderCounts = {};
             appState.tasks.forEach(t => {
-                if (!['DONE', 'ARCHIVED'].includes(t.status)) {
+                if (!['DONE', 'DROPPED', 'COMPLETED'].includes(t.status)) {
                     folderCounts[t.folder] = (folderCounts[t.folder] || 0) + 1;
                 }
             });
@@ -2527,7 +2531,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             document.getElementById('taskModalTitle').textContent = task ? 'Edit Task' : 'New Task';
             document.getElementById('taskTitle').value = task?.title || '';
             document.getElementById('taskFolder').value = task?.folder || 'LIFE';
-            document.getElementById('taskStatus').value = task?.status || 'INBOX';
+            setStatusSelect('taskStatus', task?.status || 'INBOX');
             document.getElementById('taskPriority').value = task?.priority || 'P2';
             document.getElementById('taskDueDate').value = task?.dueDate || '';
             document.getElementById('taskEffort').value = task?.effort || '';
@@ -2542,6 +2546,19 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
 
         function closeTaskModal() {
             document.getElementById('taskModal').classList.remove('active');
+        }
+
+        // A stored status the list doesn't offer stays selected. Without this the select
+        // goes blank, and saving the form would overwrite the status with "".
+        function setStatusSelect(id, value) {
+            const select = document.getElementById(id);
+            select.querySelectorAll('option[data-stored]').forEach(o => o.remove());
+            if (![...select.options].some(o => o.value === value)) {
+                const option = new Option(value, value);
+                option.dataset.stored = '1';
+                select.add(option);
+            }
+            select.value = value;
         }
 
         function saveTask() {
@@ -2645,7 +2662,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             document.getElementById('projectModalTitle').textContent = project ? 'Edit Project' : 'New Project';
             document.getElementById('projectTitle').value = project?.title || '';
             document.getElementById('projectFolder').value = project?.folder || 'LIFE';
-            document.getElementById('projectStatus').value = project?.status || 'ACTIVE';
+            setStatusSelect('projectStatus', project?.status || 'ACTIVE');
             document.getElementById('projectDueDate').value = project?.dueDate || '';
             document.getElementById('projectDescription').value = project?.description || '';
 
@@ -2712,7 +2729,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             document.getElementById('decisionModalTitle').textContent = decision ? 'Edit Decision' : 'New Decision';
             document.getElementById('decisionTitle').value = decision?.title || decision?.decision || '';
             document.getElementById('decisionFolder').value = decision?.folder || 'LIFE';
-            document.getElementById('decisionStatus').value = decision?.status || 'PROPOSED';
+            setStatusSelect('decisionStatus', decision ? (decision.status || '') : 'DECIDED');
             document.getElementById('decisionDate').value = decision?.date || new Date().toISOString().split('T')[0];
             document.getElementById('decisionProject').value = decision?.projectId || linkedProjectId || '';
             document.getElementById('decisionWhy').value = decision?.why || decision?.rationale || '';
@@ -2738,7 +2755,8 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
                 const decision = appState.decisions.find(d => d.id === appState.editingDecisionId);
                 decision.title = title;
                 decision.folder = document.getElementById('decisionFolder').value;
-                decision.status = document.getElementById('decisionStatus').value;
+                // Status is optional on decisions, and "" isn't a valid value for it.
+                decision.status = document.getElementById('decisionStatus').value || null;
                 decision.date = document.getElementById('decisionDate').value;
                 decision.projectId = document.getElementById('decisionProject').value;
                 decision.why = document.getElementById('decisionWhy').value;
@@ -2752,7 +2770,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
                     title,
                     folder: document.getElementById('decisionFolder').value,
                     projectId: document.getElementById('decisionProject').value,
-                    status: document.getElementById('decisionStatus').value,
+                    status: document.getElementById('decisionStatus').value || null,
                     date: document.getElementById('decisionDate').value,
                     why: document.getElementById('decisionWhy').value,
                     assumptions: document.getElementById('decisionAssumptions').value,
@@ -2830,7 +2848,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             document.getElementById('blockerTitle').value = blocker?.title || '';
             document.getElementById('blockerFolder').value = blocker?.folder || 'LIFE';
             document.getElementById('blockerSeverity').value = blocker?.severity || 'HIGH';
-            document.getElementById('blockerStatus').value = blocker?.status || 'OPEN';
+            setStatusSelect('blockerStatus', blocker?.status || 'OPEN');
             document.getElementById('blockerProject').value = blocker?.projectId || linkedProjectId || '';
             document.getElementById('blockerDescription').value = blocker?.description || '';
             document.getElementById('blockerResolution').value = blocker?.resolution || '';

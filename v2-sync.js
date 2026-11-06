@@ -6,7 +6,12 @@
 // sends one patch per record with the version it was based on. A failed save stays
 // local and visible, and nothing here can remove a record from the server: a record
 // missing from the app becomes a soft delete, and a suspiciously large number of them
-// is refused until Nick taps retry.
+// is refused until Nick confirms that list. The retry tap alone never approves it.
+//
+// An edit is recorded as pending BEFORE anything is sent, and whenever it's made with no
+// server copy loaded, so closing the tab or signing out can't lose it. A pending edit is
+// separate from a failed save (nickos_unsaved): it keeps pushing and shows no red pill.
+// The next load re-sends it, and idempotency keys make that safe.
 
 export const ENTITIES = ['projects', 'tasks', 'decisions', 'docs', 'blockers', 'reviews'];
 const REF_FIELDS = ['projectId', 'parentProject'];
@@ -17,6 +22,9 @@ export const MASS_DELETE_LIMIT = 20;
 const UNSAVED = 'nickos_unsaved';
 const BASE = 'nickos_v2_base';
 const ORPHAN = 'nickos_v2_orphan';
+const PENDING = 'nickos_v2_pending';
+const KEEPALIVE_MAX_BYTES = 60000; // browsers refuse keepalive bodies over 64 KB
+const ITEM_ERRORS = new Set([400, 404, 422]); // this record is the problem, not the connection
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 const copy = (x) => JSON.parse(JSON.stringify(x));
@@ -78,34 +86,50 @@ export function overlappingFields(before, server, patch) {
   return Object.keys(patch).filter((k) => !same(server[k], before[k]) && !same(server[k], patch[k]));
 }
 
-export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, onStatus, render, isBusy = () => false, log = console }) {
+export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, onStatus, render, isBusy = () => false, saveLocal = () => {}, log = console }) {
   let base = null;
   let writable = null;
   let since = null;
   let pushing = false;
   let again = false;
   let loaded = false;
-  let preLoad = null;
+  // The local copy as it was before any edit this session. Edits made with no server copy
+  // loaded are diffed against this, so only real edits are sent, never a stale local copy.
+  let boot = null;
+  let needsRefresh = false;
+  let massDeletes = [];
 
   const status = (s, err) => onStatus(s, err || null);
   const hasUnsaved = () => { try { return storage.getItem(UNSAVED) === '1'; } catch (_) { return false; } };
+  const hasPending = () => { try { return storage.getItem(PENDING) === '1'; } catch (_) { return false; } };
+  const baseJson = () => JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, [...base[e].values()]])));
 
   function markUnsaved() {
     try {
+      storage.setItem(BASE, baseJson());
       storage.setItem(UNSAVED, '1');
-      storage.setItem(BASE, JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, [...base[e].values()]]))));
     } catch (e) { log.error('[v2-sync] could not persist unsaved state:', e); }
   }
+  // The base goes first, so the flag never exists without one.
+  function markPending(json) {
+    try {
+      storage.setItem(BASE, json);
+      storage.setItem(PENDING, '1');
+    } catch (e) { log.error('[v2-sync] could not persist pending edit:', e); }
+  }
   function clearUnsaved() {
-    try { storage.removeItem(UNSAVED); storage.removeItem(BASE); } catch (_) {}
+    try { storage.removeItem(UNSAVED); storage.removeItem(PENDING); storage.removeItem(BASE); } catch (_) {}
   }
 
   async function call(method, path, body) {
     const token = await getToken();
+    const payload = body ? JSON.stringify(body) : undefined;
     const res = await fetchImpl(apiBase + path, {
       method,
       headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined
+      body: payload,
+      // Lets a save finish after the tab closes. An oversized body fails the fetch, so skip it.
+      ...(payload && payload.length < KEEPALIVE_MAX_BYTES ? { keepalive: true } : {})
     });
     let data = null;
     try { data = await res.json(); } catch (_) { /* a non-JSON body is reported by status */ }
@@ -118,7 +142,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     return data;
   }
 
-  const toMaps = (data) => Object.fromEntries(ENTITIES.map((e) => [e, new Map((data[e] || []).map((r) => [r.id, copy(r)]))]));
+  const toMaps = (data) => Object.fromEntries(ENTITIES.map((e) => [e, new Map((data[e] || []).filter((r) => r && r.id != null).map((r) => [r.id, copy(r)]))]));
   const stepBack = (iso) => new Date(new Date(iso).getTime() - POLL_OVERLAP_MS).toISOString();
 
   function applyAll(body) {
@@ -133,15 +157,51 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
    * stays and is retried against the base it was made from. If that base was lost a
    * diff can't be trusted, so the local copy is set aside and the server's is used.
    */
-  const entitiesNow = () => { const st = getState(); return JSON.stringify(ENTITIES.map((e) => st[e])); };
+  const entitiesNow = () => { const st = getState(); return JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, st[e]]))); };
+
+  /** Record the local copy before any edit. Call once the app has loaded it. */
+  function captureBoot() {
+    if (boot === null) boot = entitiesNow();
+  }
+
+  /** Call after every local save. An edit with no server copy loaded has to survive a reload. */
+  function noteEdit() {
+    if (loaded || boot === null || hasUnsaved() || hasPending()) return;
+    if (entitiesNow() !== boot) markPending(boot);
+  }
+
+  /** Signed out: no server copy to save against, so edits from here on are pending. */
+  function signedOut() {
+    if (hasPending() || hasUnsaved()) { loaded = false; return; } // those keep their own base
+    loaded = false;
+    boot = entitiesNow();
+  }
+
+  function edited() {
+    const state = getState();
+    return ENTITIES.some((e) => {
+      if (!Array.isArray(state[e])) return false;
+      const d = diffEntity(base[e], state[e], writable[e]);
+      return d.creates.length || d.updates.length || d.deletes.length;
+    });
+  }
+
+  /** After recovering edits, catch up on what changed on the server in the meantime. */
+  async function refresh() {
+    try {
+      const body = await call('GET', '/all');
+      if (pushing || hasUnsaved() || edited()) return;
+      applyAll(body);
+      needsRefresh = false;
+      render();
+    } catch (e) { log.warn('[v2-sync] refresh after recovery failed:', e); }
+  }
 
   async function load() {
     let setAside = false;
     // Stay red with unsaved work: the red pill is what lets Nick retry if this fails.
     if (!hasUnsaved()) status('syncing');
-    // Taken before the wait: a change by the time /all answers is an edit made during load.
-    // Kept across failed attempts: edits made during an outage count too.
-    if (preLoad === null) preLoad = entitiesNow();
+    captureBoot();
     const body = await call('GET', '/all');
     writable = Object.fromEntries(ENTITIES.map((e) => [e, new Set(body.writable[e] || [])]));
     if (hasUnsaved()) {
@@ -151,6 +211,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         base = toMaps(saved);
         since = stepBack(body.serverTime);
         loaded = true;
+        needsRefresh = true;
         status('save-failed', 'Unsaved changes from a previous session');
         return;
       }
@@ -168,19 +229,40 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     if (!serverHolds && ENTITIES.some((e) => (state[e] || []).length)) {
       throw new Error('The server returned no records. Keeping the local copy and not syncing.');
     }
-    // push() can't send before a base exists, and applyAll would overwrite the edit, so
-    // keep the local copy and say so rather than dropping it silently.
-    if (!setAside && entitiesNow() !== preLoad) {
-      setAside = true;
-      try {
-        const st = getState();
-        storage.setItem(ORPHAN, JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, st[e]]))));
-      } catch (_) {}
-      log.warn('[v2-sync] edit made during load set aside in', ORPHAN);
+    // Edits made before there was a server copy: a reload left them pending, or they were
+    // made this session while signed out or during an outage. applyAll would overwrite
+    // them, so send them against the copy they were made from, then catch up.
+    if (!setAside) {
+      let from = null;
+      if (hasPending()) {
+        try { from = JSON.parse(storage.getItem(BASE) || 'null'); } catch (_) {}
+        if (!from) {
+          // Can't diff without the base. Keep the copy and say so, never overwrite silently.
+          try {
+            const st = getState();
+            storage.setItem(ORPHAN, JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, st[e]]))));
+          } catch (_) {}
+          log.warn('[v2-sync] pending edit had no base; local copy kept in', ORPHAN);
+          setAside = true;
+        }
+      } else if (entitiesNow() !== boot) {
+        from = JSON.parse(boot);
+      }
+      if (from) {
+        base = toMaps(from);
+        since = stepBack(body.serverTime);
+        loaded = true;
+        boot = null;
+        needsRefresh = true;
+        await push();
+        render();
+        return;
+      }
     }
     applyAll(body);
     loaded = true;
-    preLoad = null;
+    boot = null;
+    try { storage.removeItem(PENDING); } catch (_) {}
     if (setAside) status('save-failed', 'Earlier edits were not saved. Please check them and enter them again.');
     else status('signed-in');
     render();
@@ -209,7 +291,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     remapRefs(localId, record.id);
   }
 
-  async function sendUpdates(entity, updates, conflicts, { localWins }) {
+  async function sendUpdates(entity, updates, conflicts, failures, { localWins }) {
     for (let i = 0; i < updates.length; i += BATCH) {
       const chunk = updates.slice(i, i + BATCH);
       const res = await call('POST', '/batchUpdate', {
@@ -227,7 +309,8 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
           if (local) local.versionSys = r.versionSys;
           continue;
         }
-        if (r.code !== 'VERSION_CONFLICT') throw new Error(`${u.id}: ${r.error}`);
+        // One bad record must not hold back every edit after it.
+        if (r.code !== 'VERSION_CONFLICT') { failures.push(`${u.id}: ${r.error}`); continue; }
         const { record: server } = await call('GET', `/get?entity=${entity}&id=${encodeURIComponent(u.id)}`);
         const overlap = localWins ? [] : overlappingFields(base[entity].get(u.id), server, u.patch);
         if (overlap.length) { conflicts.push(`${u.id} (${overlap.join(', ')})`); continue; }
@@ -242,7 +325,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     }
   }
 
-  async function sendDeletes(entity, deletes) {
+  async function sendDeletes(entity, deletes, failures) {
     for (const d of deletes) {
       try {
         await call('POST', '/delete', {
@@ -251,6 +334,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         });
         base[entity].delete(d.id);
       } catch (e) {
+        if (ITEM_ERRORS.has(e.status)) { failures.push(`${d.id}: ${e.message}`); continue; }
         if (e.code !== 'VERSION_CONFLICT') throw e;
         const { record } = await call('GET', `/get?entity=${entity}&id=${encodeURIComponent(d.id)}`);
         if (record.lifecycleSys === 'LIVE') base[entity].set(d.id, copy(record));
@@ -262,47 +346,94 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   async function pass(opts) {
     const state = getState();
     const conflicts = [];
+    const failures = [];
+    const unsent = new Set(); // local ids that failed to create; nothing may point at them
+    const pointsAtUnsent = (r) => REF_FIELDS.some((f) => unsent.has(r[f]));
     let wrote = false;
+    massDeletes = [];
+    // The id is the retry's idempotency key, so it must be on disk before the first send.
+    let named = false;
+    for (const e of ENTITIES) {
+      for (const item of Array.isArray(state[e]) ? state[e] : []) {
+        if (item && item.id == null) {
+          item.id = `LOCAL-${Date.now().toString(36)}-${fnv(JSON.stringify(item))}`;
+          named = true;
+        }
+      }
+    }
+    if (named) saveLocal();
     // Projects go first, so records pointing at a new project get its real id.
     for (const e of ENTITIES) {
       if (!Array.isArray(state[e])) continue;
       const first = diffEntity(base[e], state[e], writable[e]);
-      for (const item of first.creates) { await sendCreate(e, item); wrote = true; }
+      for (const item of first.creates) {
+        if (pointsAtUnsent(item)) { failures.push(`${item.id}: its project wasn't saved`); unsent.add(item.id); continue; }
+        try {
+          await sendCreate(e, item);
+          wrote = true;
+        } catch (err) {
+          if (!ITEM_ERRORS.has(err.status)) throw err;
+          failures.push(`${item.title || item.id}: ${err.message}`);
+          unsent.add(item.id);
+        }
+      }
       const d = diffEntity(base[e], state[e], writable[e]);
       if (d.ignored.length) {
         log.warn('[v2-sync] not writable, not sent:', d.ignored.map((x) => `${x.id}.${x.field}`).join(', '));
         // Say it once: remember the app's value so this isn't a change on every autosave.
         for (const x of d.ignored) base[e].get(x.id)[x.field] = copy(x.value ?? null);
       }
+      const updates = d.updates.filter((u) => {
+        if (!pointsAtUnsent(u.patch)) return true;
+        failures.push(`${u.id}: its project wasn't saved`);
+        return false;
+      });
+      if (updates.length) { await sendUpdates(e, updates, conflicts, failures, opts); wrote = true; }
       if (d.deletes.length > MASS_DELETE_LIMIT && !opts.allowMassDelete) {
-        throw new Error(`Refusing to delete ${d.deletes.length} ${e} at once. Tap to confirm.`);
+        massDeletes.push({
+          entity: e,
+          count: d.deletes.length,
+          ids: d.deletes.map((x) => x.id),
+          titles: d.deletes.map((x) => base[e].get(x.id)?.title || x.id)
+        });
+        failures.push(`Refusing to delete ${d.deletes.length} ${e} at once. Tap to review.`);
+      } else if (d.deletes.length) {
+        await sendDeletes(e, d.deletes, failures);
+        wrote = true;
       }
-      if (d.updates.length) { await sendUpdates(e, d.updates, conflicts, opts); wrote = true; }
-      if (d.deletes.length) { await sendDeletes(e, d.deletes); wrote = true; }
     }
-    return { conflicts, wrote };
+    return { conflicts, failures, wrote };
   }
 
   async function push(opts = {}) {
-    if (!loaded) return;
+    if (!loaded) { noteEdit(); return; }
     if (pushing) { again = true; return; }
     pushing = true;
+    let saved = false;
     try {
       do {
         again = false;
+        if (edited()) markPending(baseJson());
         let conflicts = [];
+        let failures = [];
         let settled = false;
         for (let i = 0; i < MAX_PASSES; i++) {
           const r = await pass(opts);
           conflicts = r.conflicts;
-          if (conflicts.length) break;
+          failures = r.failures;
+          if (conflicts.length || failures.length) break;
           // Only a pass with nothing left to send proves everything landed.
           if (!r.wrote) { settled = true; break; }
         }
-        if (conflicts.length) throw new Error(`Also changed elsewhere: ${conflicts.join('; ')}. Tap to keep yours.`);
+        const problems = [
+          ...failures,
+          ...(conflicts.length ? [`Also changed elsewhere: ${conflicts.join('; ')}. Tap to keep yours.`] : [])
+        ];
+        if (problems.length) throw new Error(problems.join(' | '));
         if (!settled) throw new Error('Records kept changing while saving. Tap to try again.');
       } while (again);
       clearUnsaved();
+      saved = true;
       status('signed-in');
     } catch (e) {
       log.error('[v2-sync] save failed:', e);
@@ -311,9 +442,14 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     } finally {
       pushing = false;
     }
+    if (saved && needsRefresh) await refresh();
   }
 
-  /** The red pill's tap: Nick has seen the warning, so his copy wins this time. */
+  /**
+   * The red pill's tap: Nick has seen the warning, so his copy wins this time. Conflicts
+   * only. A large delete still needs confirmMassDelete(), because a stale local copy looks
+   * exactly like one and a retry tap says nothing about wanting those records gone.
+   */
   async function retry() {
     if (!loaded) {
       try {
@@ -324,20 +460,34 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         return;
       }
     }
+    await push({ localWins: true });
+  }
+
+  /** Nick reviewed the list and wants these records deleted. */
+  async function confirmMassDelete() {
     await push({ localWins: true, allowMassDelete: true });
   }
 
-  async function poll() {
-    if (!loaded || pushing || hasUnsaved() || isBusy()) return;
+  /** Nick didn't want that: put the records back from the last server copy. */
+  function restoreMassDelete() {
     const state = getState();
-    const edited = () => ENTITIES.some((e) => {
-      if (!Array.isArray(state[e])) return false;
-      const d = diffEntity(base[e], state[e], writable[e]);
-      return d.creates.length || d.updates.length || d.deletes.length;
-    });
+    for (const m of massDeletes) {
+      const list = state[m.entity];
+      for (const id of m.ids) {
+        if (base[m.entity].has(id) && !list.some((x) => x && x.id === id)) list.push(copy(base[m.entity].get(id)));
+      }
+    }
+    massDeletes = [];
+    saveLocal();
+    render();
+  }
+
+  async function poll() {
+    if (!loaded || pushing || hasUnsaved() || hasPending() || isBusy()) return;
+    const state = getState();
     // Checked again after each wait: an edit made meanwhile must not be replaced. since
     // stays put, so the next poll fetches the same changes.
-    const standDown = () => pushing || hasUnsaved() || isBusy() || edited();
+    const standDown = () => pushing || hasUnsaved() || hasPending() || isBusy() || edited();
     if (edited()) return;
     const body = await call('GET', `/changes?since=${encodeURIComponent(since)}`);
     if (standDown()) return;
@@ -370,5 +520,10 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     if (changed) render();
   }
 
-  return { load, push, retry, poll, get loaded() { return loaded; }, get pushing() { return pushing; } };
+  return {
+    load, push, retry, poll, captureBoot, noteEdit, signedOut, confirmMassDelete, restoreMassDelete,
+    get loaded() { return loaded; },
+    get pushing() { return pushing; },
+    get massDeletes() { return massDeletes; }
+  };
 }
