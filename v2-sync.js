@@ -23,6 +23,7 @@ export const MASS_CREATE_LIMIT = 20;
 const UNSAVED = 'nickos_unsaved';
 const BASE = 'nickos_v2_base';
 const ORPHAN = 'nickos_v2_orphan';
+const SET_ASIDE_MAX = 5;
 const PENDING = 'nickos_v2_pending';
 const KEEPALIVE_MAX_BYTES = 60000; // browsers refuse keepalive bodies over 64 KB
 const ITEM_ERRORS = new Set([400, 404, 422]); // this record is the problem, not the connection
@@ -36,6 +37,12 @@ function fnv(s) {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
   return (h >>> 0).toString(36);
 }
+
+/** A rejected login needs a person; retrying won't change the answer. */
+export const isNotAuthorized = (e) => e?.status === 401 || e?.status === 403;
+
+/** Wait before the next load attempt: 15s, 30s, 1m, 2m, then every 5m. */
+export const retryDelayMs = (attempt) => Math.min(15000 * 2 ** Math.max(0, attempt), 300000);
 
 /** The backend to use. The dev override only ever applies on localhost. */
 export function resolveBackend(configured, hostname, storage) {
@@ -122,6 +129,51 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     try { storage.removeItem(UNSAVED); storage.removeItem(PENDING); storage.removeItem(BASE); } catch (_) {}
   }
 
+  /** Edits that couldn't be saved. A list, so a new one never overwrites an older one. */
+  function readSetAside() {
+    try {
+      const v = JSON.parse(storage.getItem(ORPHAN) || '[]');
+      return Array.isArray(v) ? v : [{ at: null, reason: 'Earlier edits that were not saved', data: v }];
+    } catch (_) { return []; }
+  }
+
+  function setAside(reason, data) {
+    const list = [{ at: new Date().toISOString(), reason, data }, ...readSetAside()].slice(0, SET_ASIDE_MAX);
+    // Browser storage is limited, and the app's own copy lives there too: drop the oldest first.
+    while (list.length) {
+      try { storage.setItem(ORPHAN, JSON.stringify(list)); return true; } catch (_) { list.pop(); }
+    }
+    log.error('[v2-sync] could not keep edits set aside:', reason);
+    return false;
+  }
+
+  function dismissSetAside(index) {
+    const list = readSetAside();
+    list.splice(index, 1);
+    try {
+      if (list.length) storage.setItem(ORPHAN, JSON.stringify(list));
+      else storage.removeItem(ORPHAN);
+    } catch (_) {}
+  }
+
+  /** What the local copy holds that the server doesn't: the part worth keeping, and it fits. */
+  function localDifferences(serverData) {
+    const state = getState();
+    const out = {};
+    for (const e of ENTITIES) {
+      const server = new Map((serverData[e] || []).map((r) => [r.id, r]));
+      const differ = (Array.isArray(state[e]) ? state[e] : []).filter((r) => {
+        if (!r) return false;
+        const s = server.get(r.id);
+        if (!s) return true;
+        return [...new Set([...Object.keys(r), ...Object.keys(s)])].some((k) =>
+          !k.endsWith('Sys') && !same(r[k], s[k]) && !(blank(r[k]) && blank(s[k])));
+      });
+      if (differ.length) out[e] = differ;
+    }
+    return out;
+  }
+
   async function call(method, path, body) {
     const token = await getToken();
     const payload = body ? JSON.stringify(body) : undefined;
@@ -199,7 +251,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   }
 
   async function load() {
-    let setAside = false;
+    let setAsideNow = false;
     // Stay red with unsaved work: the red pill is what lets Nick retry if this fails.
     if (!hasUnsaved()) status('syncing');
     captureBoot();
@@ -216,13 +268,10 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         status('save-failed', 'Unsaved changes from a previous session');
         return;
       }
-      try {
-        const state = getState();
-        storage.setItem(ORPHAN, JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, state[e]]))));
-      } catch (_) {}
-      log.warn('[v2-sync] unsaved edits had no base; local copy kept in', ORPHAN);
+      setAside('Unsaved edits from an earlier session, with nothing to compare them against', localDifferences(body.data));
+      log.warn('[v2-sync] unsaved edits had no base; local differences set aside');
       clearUnsaved();
-      setAside = true;
+      setAsideNow = true;
     }
     // An empty answer with a full local copy means the wrong target, not an empty life.
     const serverHolds = ENTITIES.some((e) => (body.data[e] || []).length);
@@ -233,18 +282,15 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     // Edits made before there was a server copy: a reload left them pending, or they were
     // made this session while signed out or during an outage. applyAll would overwrite
     // them, so send them against the copy they were made from, then catch up.
-    if (!setAside) {
+    if (!setAsideNow) {
       let from = null;
       if (hasPending()) {
         try { from = JSON.parse(storage.getItem(BASE) || 'null'); } catch (_) {}
         if (!from) {
           // Can't diff without the base. Keep the copy and say so, never overwrite silently.
-          try {
-            const st = getState();
-            storage.setItem(ORPHAN, JSON.stringify(Object.fromEntries(ENTITIES.map((e) => [e, st[e]]))));
-          } catch (_) {}
-          log.warn('[v2-sync] pending edit had no base; local copy kept in', ORPHAN);
-          setAside = true;
+          setAside('Pending edits from an earlier session, with nothing to compare them against', localDifferences(body.data));
+          log.warn('[v2-sync] pending edit had no base; local differences set aside');
+          setAsideNow = true;
         }
       } else if (entitiesNow() !== boot) {
         from = JSON.parse(boot);
@@ -264,7 +310,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     loaded = true;
     boot = null;
     try { storage.removeItem(PENDING); } catch (_) {}
-    if (setAside) status('save-failed', 'Earlier edits were not saved. Please check them and enter them again.');
+    if (setAsideNow) status('save-failed', 'Earlier edits were not saved. Tap "set aside" to see them.');
     else status('signed-in');
     render();
   }
@@ -313,6 +359,17 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         // One bad record must not hold back every edit after it.
         if (r.code !== 'VERSION_CONFLICT') { failures.push(`${u.id}: ${r.error}`); continue; }
         const { record: server } = await call('GET', `/get?entity=${entity}&id=${encodeURIComponent(u.id)}`);
+        // Archived or deleted elsewhere: an edit reapplied here would show green and be gone
+        // on reload. Take the record out, as a poll would, and keep the edit where Nick sees it.
+        if (server.lifecycleSys && server.lifecycleSys !== 'LIVE') {
+          setAside(`${u.id} was ${String(server.lifecycleSys).toLowerCase()} elsewhere, so this edit was not saved`, { [entity]: [{ id: u.id, title: server.title, ...copy(u.patch) }] });
+          base[entity].delete(u.id);
+          const list = getState()[entity] || [];
+          const at = list.findIndex((x) => x && x.id === u.id);
+          if (at >= 0) list.splice(at, 1);
+          failures.push(`${u.id}: changed elsewhere and no longer live. Your edit was set aside.`);
+          continue;
+        }
         const overlap = localWins ? [] : overlappingFields(base[entity].get(u.id), server, u.patch);
         if (overlap.length) { conflicts.push(`${u.id} (${overlap.join(', ')})`); continue; }
         // Take the server's copy as the new base and keep only Nick's patch on top, so
@@ -530,6 +587,8 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
 
   return {
     load, push, retry, poll, captureBoot, noteEdit, signedOut, confirmMassDelete, restoreMassDelete,
+    setAsideEdits: readSetAside, dismissSetAside,
+    getRecord: async (entity, id) => (await call('GET', `/get?entity=${entity}&id=${encodeURIComponent(id)}`)).record,
     get loaded() { return loaded; },
     get pushing() { return pushing; },
     get massDeletes() { return massDeletes; }

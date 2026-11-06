@@ -1640,7 +1640,6 @@
             const today = tasks.filter(t => t.status === 'IN_PROGRESS').sort((a,b) => ({'P0':0,'P1':1,'P2':2,'P3':3}[a.priority]||3) - ({'P0':0,'P1':1,'P2':2,'P3':3}[b.priority]||3));
             const next = tasks.filter(t => t.status === 'NEXT');
             const waiting = tasks.filter(t => t.status === 'WAITING');
-            const blocked = tasks.filter(t => t.status === 'BLOCKED');
             const done = tasks.filter(t => t.status === 'DONE');
             const active = tasks.filter(t => ['INBOX','IN_PROGRESS','NEXT','WAITING'].includes(t.status));
             const nowStr = new Date().toISOString().split('T')[0];
@@ -1711,9 +1710,9 @@
                         <div class="stat-value" style="color:${overdue.length > 0 ? '#ef4444' : '#10b981'};">${overdue.length}</div>
                         <div class="stat-label">Overdue</div>
                     </div>
-                    <div class="stat-card" style="cursor:pointer;" onclick="appState.taskFilters.status='BLOCKED';navigateTo('tasks');">
-                        <div class="stat-value" style="color:${blocked.length > 0 ? '#f59e0b' : '#10b981'};">${blocked.length}</div>
-                        <div class="stat-label">Blocked</div>
+                    <div class="stat-card" style="cursor:pointer;" onclick="navigateTo('projects');">
+                        <div class="stat-value" style="color:${openBlockers.length > 0 ? '#f59e0b' : '#10b981'};">${openBlockers.length}</div>
+                        <div class="stat-label">Open blockers</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-value" style="color:#10b981;">${doneThisWeek.length}</div>
@@ -1730,7 +1729,6 @@
                     {status:'IN_PROGRESS', count:today.length, color:'#60a5fa'},
                     {status:'NEXT', count:next.length, color:'#34d399'},
                     {status:'WAITING', count:waiting.length, color:'#fbbf24'},
-                    {status:'BLOCKED', count:blocked.length, color:'#f87171'},
                     {status:'DONE', count:done.length, color:'#10b981'}
                 ];
                 html += '<div style="display:flex;height:8px;border-radius:4px;overflow:hidden;margin-bottom:24px;background:#1a1a2e;">';
@@ -1747,7 +1745,7 @@
             if (today.length > 0) {
                 html += '<div class="section"><h2 class="section-title">📌 Today (' + today.length + ')</h2>';
                 html += today.slice(0, 8).map(t => renderTaskCard(t)).join('');
-                if (today.length > 8) html += '<p class="text-muted text-sm" style="cursor:pointer;" onclick="appState.taskFilters.status=\'TODAY\';navigateTo(\'tasks\');">+' + (today.length - 8) + ' more — view all</p>';
+                if (today.length > 8) html += '<p class="text-muted text-sm" style="cursor:pointer;" onclick="appState.taskFilters.status=\'IN_PROGRESS\';navigateTo(\'tasks\');">+' + (today.length - 8) + ' more — view all</p>';
                 html += '</div>';
             }
 
@@ -2205,7 +2203,7 @@
         function renderProjectCard(project) {
             const linkedTasks = appState.tasks.filter(t => t.projectId === project.id);
             const completedTasks = linkedTasks.filter(t => t.status === 'DONE').length;
-            const blockedTasks = linkedTasks.filter(t => t.status === 'BLOCKED').length;
+            const openBlockerCount = (appState.blockers || []).filter(b => b.projectId === project.id && b.status === 'OPEN').length;
             const progress = linkedTasks.length > 0 ? Math.round((completedTasks / linkedTasks.length) * 100) : 0;
 
             const decisions = appState.decisions.filter(d => d.projectId === project.id);
@@ -2232,7 +2230,7 @@
                     ${project.description ? `<div class="project-description">${escapeHtml(project.description)}</div>` : ''}
 
                     <div class="project-section">
-                        <div class="project-section-title">Linked Tasks: ${linkedTasks.length} total | ${completedTasks} done | ${blockedTasks} blocked</div>
+                        <div class="project-section-title">Linked Tasks: ${linkedTasks.length} total | ${completedTasks} done | ${openBlockerCount} open blockers</div>
                         <div class="progress-bar">
                             <div class="progress-fill" style="width: ${progress}%"></div>
                         </div>
@@ -2491,6 +2489,7 @@
             const followup = document.getElementById('reviewFollowup').value;
 
             appState.reviews.push({
+                id: generateId('R'),
                 title: `Weekly review ${new Date().toISOString().split('T')[0]}`,
                 date: new Date().toISOString().split('T')[0],
                 summary,
@@ -2950,19 +2949,27 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             const results = [];
 
             appState.tasks.forEach(t => {
-                if (matches(t.id, t.title, t.originalText)) results.push({ type: 'task', item: t });
+                if (matches(t.id, t.title, t.originalText, t.notes, t.note, t.nextAction, t.description)) results.push({ type: 'task', item: t });
             });
 
             appState.projects.forEach(p => {
-                if (matches(p.id, p.code, p.title)) results.push({ type: 'project', item: p });
+                if (matches(p.id, p.code, p.title, p.description)) results.push({ type: 'project', item: p });
             });
 
             appState.decisions.forEach(d => {
-                if (matches(d.id, d.title, d.decision, d.summary)) results.push({ type: 'decision', item: d });
+                if (matches(d.id, d.title, d.decision, d.summary, d.why, d.rationale)) results.push({ type: 'decision', item: d });
             });
 
             appState.docs.forEach(d => {
-                if (matches(d.id, d.title)) results.push({ type: 'doc', item: d });
+                if (matches(d.id, d.title, d.notes, d.url)) results.push({ type: 'doc', item: d });
+            });
+
+            (appState.blockers || []).forEach(b => {
+                if (matches(b.id, b.title, b.description, b.resolution)) results.push({ type: 'blocker', item: b });
+            });
+
+            (appState.reviews || []).forEach(r => {
+                if (matches(r.id, r.title, r.summary, r.followup)) results.push({ type: 'review', item: r });
             });
 
             const html = results.slice(0, 20).map(r => `
@@ -2973,6 +2980,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             `).join('');
 
             document.getElementById('searchResults').innerHTML = html || '<div class="search-result-item" style="text-align: center; color: #9ca3af;">No results</div>';
+            if (!results.length && typeof lookupById === 'function') lookupById(query);
         }
 
         function selectSearchResult(type, id) {
@@ -2981,6 +2989,31 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             else if (type === 'project') openProjectModal(id);
             else if (type === 'decision') openDecisionModal(id);
             else if (type === 'doc') openDocModal(id);
+            else if (type === 'blocker') openBlockerModal(id);
+            else if (type === 'review') navigateTo('review');
+        }
+
+        // The app only holds live records. An exact id can still be read from the server, so
+        // an archived record can be looked at, read-only. Archived text search needs an API change.
+        const ID_ENTITY = { T: 'tasks', P: 'projects', D: 'decisions', DOC: 'docs', B: 'blockers', R: 'reviews' };
+
+        async function lookupById(raw) {
+            const m = raw.trim().match(/^(doc|t|p|d|b|r)-[a-z0-9]{3,}$/i);
+            const getRecord = window.nickosCloud?.getRecord;
+            if (!m || !getRecord) return;
+            const entity = ID_ENTITY[m[1].toUpperCase()];
+            const id = raw.trim().toUpperCase();
+            if ((appState[entity] || []).some(r => r.id === id)) return;
+            let record;
+            try { record = await getRecord(entity, id); } catch (e) { return; } // not found, or offline
+            if (!record || document.getElementById('searchInput').value.trim().toUpperCase() !== id) return;
+            const body = [record.description, record.notes, record.note, record.originalText, record.why, record.summary].filter(Boolean).join('\n\n');
+            document.getElementById('searchResults').innerHTML = `
+                <details class="search-result-item" open>
+                    <summary class="search-result-title">${escapeHtml(record.title || record.decision || record.id)}</summary>
+                    <div class="search-result-meta">${escapeHtml(String(record.lifecycleSys || ''))} • ${escapeHtml(record.id)}${record.status ? ' • ' + escapeHtml(record.status) : ''} • read-only</div>
+                    <div style="white-space:pre-wrap;margin-top:8px;">${escapeHtml(body)}</div>
+                </details>`;
         }
 
         /* ═══════ UTILITIES ═══════ */
@@ -3050,6 +3083,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         };
 
         function saveToLocalStorage() {
+            if (window.nickosTabLocked) return; // another tab owns the shared local copy
             try {
                 const payload = {
                     _version: '4.0',
@@ -3087,6 +3121,8 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
                 // Restore UI preferences
                 if (data.currentPage) appState.currentPage = data.currentPage;
                 if (data.taskFilters) appState.taskFilters = data.taskFilters;
+                // Saved before v2: these statuses no longer exist, so the list would look empty.
+                if (['TODAY', 'BLOCKED', 'ARCHIVED', 'ON_HOLD'].includes(appState.taskFilters?.status)) appState.taskFilters.status = '';
                 if (data.taskView) appState.taskView = data.taskView;
 
                 // MERGE RULE: Inline HTML data is ALWAYS the boot source of truth.
@@ -3096,7 +3132,8 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
                 entityKeys.forEach(key => {
                     if (!data[key] || !Array.isArray(data[key])) return;
                     const inlineIds = new Set((appState[key] || []).map(item => item.id));
-                    const newItems = data[key].filter(item => item.id && !inlineIds.has(item.id));
+                    // A record with no id hasn't been sent yet (old reviews), so it must survive too.
+                    const newItems = data[key].filter(item => item && (!item.id || !inlineIds.has(item.id)));
                     if (newItems.length > 0) {
                         appState[key] = [...appState[key], ...newItems];
                         // console.log('[NickOS] Merged ' + newItems.length + ' new ' + key + ' from localStorage');
@@ -3394,12 +3431,53 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         window.saveToLocalStorage = saveToLocalStorage;
         window.render = render;
     </script>
-    <script type="module" src="cloud-sync.js?v=13"></script>
+    <script type="module" src="cloud-sync.js?v=14"></script>
     <script>
+        // All tabs share one local copy, so an older tab's autosave could overwrite a newer
+        // tab's unsaved edits. The newest tab wins; the older one stops and offers to take over.
+        if ('BroadcastChannel' in window) {
+            const tabId = `${Date.now()}-${Math.random()}`;
+            const tabs = new BroadcastChannel('nickos_tabs');
+            tabs.onmessage = (m) => {
+                if (m.data?.hello === tabId || window.nickosTabLocked) return;
+                window.nickosTabLocked = true;
+                const cover = document.createElement('div');
+                cover.id = 'nickos-tab-locked';
+                cover.style.cssText = 'position:fixed;inset:0;z-index:100001;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(0,0,0,0.85);color:#e5e7eb;font:15px -apple-system,system-ui,sans-serif;text-align:center;padding:24px;';
+                cover.innerHTML = '<div>NickOS is open in another tab.</div><button style="padding:8px 14px;border-radius:6px;border:1px solid #444;background:#222;color:#e5e7eb;cursor:pointer;">Use this tab</button>';
+                cover.querySelector('button').onclick = () => location.reload();
+                document.body.appendChild(cover);
+            };
+            tabs.postMessage({ hello: tabId });
+        }
+
         // PWA service worker registration — only runs over http(s), silently skipped on file://
         if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+            // New files only reach a page that reloads, so a suspended phone app could keep
+            // running old code that writes to the wrong place (B-0129). Reload once the new
+            // service worker takes over, but never over a form or a field being typed in.
+            let hadController = Boolean(navigator.serviceWorker.controller);
+            let reloading = false;
+            const reloadWhenIdle = () => {
+                if (reloading) return;
+                const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+                if (document.querySelector('.modal-overlay.active') || typing) {
+                    setTimeout(reloadWhenIdle, 2000);
+                    return;
+                }
+                reloading = true;
+                location.reload();
+            };
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                if (!hadController) { hadController = true; return; } // the first install, not an update
+                reloadWhenIdle();
+            });
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('service-worker.js').catch(() => {});
+                navigator.serviceWorker.register('service-worker.js').then((reg) => {
+                    document.addEventListener('visibilitychange', () => {
+                        if (document.visibilityState === 'visible') reg.update().catch(() => {});
+                    });
+                }).catch(() => {});
             });
         }
     </script>
