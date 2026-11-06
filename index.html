@@ -1520,6 +1520,9 @@
             initializeApp();
             setupEventListeners();
             loadFromLocalStorage();
+            // Sync compares against this copy, so it must not read it before this point.
+            window.nickosLocalCopyLoaded = true;
+            window.dispatchEvent(new Event('nickos-local-copy'));
             render();
         });
 
@@ -2333,6 +2336,7 @@
                             <div class="form-group">
                                 <label class="form-label">Folder</label>
                                 <select id="triageFolder">
+                                    ${FOLDERS.includes(current.folder) ? '' : `<option value="${escapeHtml(current.folder || '').replace(/"/g, '&quot;')}" selected>${escapeHtml(current.folder || '(none)')}</option>`}
                                     ${FOLDERS.map(f => `<option value="${f}" ${current.folder === f ? 'selected' : ''}>${f}</option>`).join('')}
                                 </select>
                             </div>
@@ -2372,7 +2376,7 @@
                 current.priority = priority;
             }
 
-            current.folder = folder;
+            if (folder) current.folder = folder;
             appState.triageIndex++;
             saveToLocalStorage();
             render();
@@ -2525,21 +2529,22 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
 
         /* ═══════ MODALS ═══════ */
         function openTaskModal(taskId = null) {
+            populateProjectSelects();
             appState.editingTaskId = taskId;
             const task = taskId ? appState.tasks.find(t => t.id === taskId) : null;
 
             document.getElementById('taskModalTitle').textContent = task ? 'Edit Task' : 'New Task';
-            document.getElementById('taskTitle').value = task?.title || '';
-            document.getElementById('taskFolder').value = task?.folder || 'LIFE';
-            setStatusSelect('taskStatus', task?.status || 'INBOX');
-            document.getElementById('taskPriority').value = task?.priority || 'P2';
-            document.getElementById('taskDueDate').value = task?.dueDate || '';
-            document.getElementById('taskEffort').value = task?.effort || '';
-            document.getElementById('taskImpact').value = task?.impact || '';
-            document.getElementById('taskNextAction').value = task?.nextAction || '';
-            document.getElementById('taskNotes').value = task?.originalText || '';
-            document.getElementById('taskProject').value = task?.projectId || '';
-            document.getElementById('taskTags').value = task?.tags?.join(', ') || '';
+            setField('taskTitle', task?.title || '');
+            setField('taskFolder', task?.folder || 'LIFE');
+            setField('taskStatus', task?.status || 'INBOX');
+            setField('taskPriority', task?.priority || 'P2');
+            setField('taskDueDate', task?.dueDate || '');
+            setField('taskEffort', task?.effort || '');
+            setField('taskImpact', task?.impact || '');
+            setField('taskNextAction', task?.nextAction || '');
+            setField('taskNotes', task?.originalText || '');
+            setField('taskProject', task?.projectId || '');
+            setField('taskTags', task?.tags?.join(', ') || '');
 
             document.getElementById('taskModal').classList.add('active');
         }
@@ -2548,18 +2553,42 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             document.getElementById('taskModal').classList.remove('active');
         }
 
-        // A stored status the list doesn't offer stays selected. Without this the select
-        // goes blank, and saving the form would overwrite the status with "".
-        function setStatusSelect(id, value) {
-            const select = document.getElementById(id);
-            select.querySelectorAll('option[data-stored]').forEach(o => o.remove());
-            if (![...select.options].some(o => o.value === value)) {
-                const option = new Option(value, value);
-                option.dataset.stored = '1';
-                select.add(option);
+        // The value each control showed when its form opened. Saving an edit writes only the
+        // controls that changed, so a value the form can't show is never overwritten by what
+        // the form showed instead (B-0132).
+        const formOpened = {};
+
+        function setField(id, value) {
+            const el = document.getElementById(id);
+            let shown = value ?? '';
+            if (el.tagName === 'SELECT') {
+                el.querySelectorAll('option[data-stored]').forEach(o => o.remove());
+                if (![...el.options].some(o => o.value === shown)) {
+                    const option = new Option(shown || '(none)', shown);
+                    option.dataset.stored = '1';
+                    el.add(option);
+                }
+            } else if (el.type === 'date') {
+                shown = String(shown).match(/^\d{4}-\d{2}-\d{2}/)?.[0] || '';
             }
-            select.value = value;
+            el.value = shown;
+            formOpened[id] = el.value;
         }
+
+        // Returns whether anything changed. fields: [recordKey, controlId, convert?]
+        function writeFields(record, fields) {
+            let changed = false;
+            for (const [key, id, convert] of fields) {
+                const value = document.getElementById(id).value;
+                if (value === formOpened[id]) continue;
+                record[key] = convert ? convert(value) : value;
+                changed = true;
+            }
+            return changed;
+        }
+
+        const trimmed = (v) => v.trim();
+        const tagList = (v) => v.split(',').map(t => t.trim()).filter(t => t);
 
         function saveTask() {
             const title = document.getElementById('taskTitle').value.trim();
@@ -2572,23 +2601,19 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
                 const task = appState.tasks.find(t => t.id === appState.editingTaskId);
                 const oldStatus = task.status;
 
-                task.title = title;
-                task.folder = document.getElementById('taskFolder').value;
-                task.status = document.getElementById('taskStatus').value;
-                task.priority = document.getElementById('taskPriority').value;
-                task.dueDate = document.getElementById('taskDueDate').value;
-                task.effort = document.getElementById('taskEffort').value;
-                task.impact = document.getElementById('taskImpact').value;
-                task.nextAction = document.getElementById('taskNextAction').value;
-                task.originalText = document.getElementById('taskNotes').value;
-                task.projectId = document.getElementById('taskProject').value;
-                task.tags = document.getElementById('taskTags').value.split(',').map(t => t.trim()).filter(t => t);
-                task.lastTouchedDate = new Date().toISOString();
-
-                if (oldStatus !== 'DONE' && task.status === 'DONE') {
-                    task.completedDate = new Date().toISOString().split('T')[0];
-                } else if (oldStatus === 'DONE' && task.status !== 'DONE') {
-                    task.completedDate = '';
+                const changed = writeFields(task, [
+                    ['title', 'taskTitle', trimmed], ['folder', 'taskFolder'], ['status', 'taskStatus'],
+                    ['priority', 'taskPriority'], ['dueDate', 'taskDueDate'], ['effort', 'taskEffort'],
+                    ['impact', 'taskImpact'], ['nextAction', 'taskNextAction'], ['originalText', 'taskNotes'],
+                    ['projectId', 'taskProject'], ['tags', 'taskTags', tagList]
+                ]);
+                if (changed) {
+                    task.lastTouchedDate = new Date().toISOString();
+                    if (oldStatus !== 'DONE' && task.status === 'DONE') {
+                        task.completedDate = new Date().toISOString().split('T')[0];
+                    } else if (oldStatus === 'DONE' && task.status !== 'DONE') {
+                        task.completedDate = '';
+                    }
                 }
             } else {
                 appState.tasks.push({
@@ -2660,11 +2685,11 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             const project = projectId ? appState.projects.find(p => p.id === projectId) : null;
 
             document.getElementById('projectModalTitle').textContent = project ? 'Edit Project' : 'New Project';
-            document.getElementById('projectTitle').value = project?.title || '';
-            document.getElementById('projectFolder').value = project?.folder || 'LIFE';
-            setStatusSelect('projectStatus', project?.status || 'ACTIVE');
-            document.getElementById('projectDueDate').value = project?.dueDate || '';
-            document.getElementById('projectDescription').value = project?.description || '';
+            setField('projectTitle', project?.title || '');
+            setField('projectFolder', project?.folder || 'LIFE');
+            setField('projectStatus', project?.status || 'ACTIVE');
+            setField('projectDueDate', project?.dueDate || '');
+            setField('projectDescription', project?.description || '');
 
             document.getElementById('projectModal').classList.add('active');
         }
@@ -2682,12 +2707,11 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
 
             if (appState.editingProjectId) {
                 const project = appState.projects.find(p => p.id === appState.editingProjectId);
-                project.title = title;
-                project.folder = document.getElementById('projectFolder').value;
-                project.status = document.getElementById('projectStatus').value;
-                project.dueDate = document.getElementById('projectDueDate').value;
-                project.description = document.getElementById('projectDescription').value;
-                project.updated = new Date().toISOString();
+                const changed = writeFields(project, [
+                    ['title', 'projectTitle', trimmed], ['folder', 'projectFolder'], ['status', 'projectStatus'],
+                    ['dueDate', 'projectDueDate'], ['description', 'projectDescription']
+                ]);
+                if (changed) project.updated = new Date().toISOString();
             } else {
                 appState.projects.push({
                     id: generateId('P'),
@@ -2723,19 +2747,20 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         }
 
         function openDecisionModal(decisionId = null, linkedProjectId = null) {
+            populateProjectSelects();
             appState.editingDecisionId = decisionId;
             const decision = decisionId ? appState.decisions.find(d => d.id === decisionId) : null;
 
             document.getElementById('decisionModalTitle').textContent = decision ? 'Edit Decision' : 'New Decision';
-            document.getElementById('decisionTitle').value = decision?.title || decision?.decision || '';
-            document.getElementById('decisionFolder').value = decision?.folder || 'LIFE';
-            setStatusSelect('decisionStatus', decision ? (decision.status || '') : 'DECIDED');
-            document.getElementById('decisionDate').value = decision?.date || new Date().toISOString().split('T')[0];
-            document.getElementById('decisionProject').value = decision?.projectId || linkedProjectId || '';
-            document.getElementById('decisionWhy').value = decision?.why || decision?.rationale || '';
-            document.getElementById('decisionAssumptions').value = decision?.assumptions || '';
-            document.getElementById('decisionRisks').value = decision?.risks || '';
-            document.getElementById('decisionWhatWouldChange').value = decision?.whatWouldChange || decision?.whatWouldChangeIt || '';
+            setField('decisionTitle', decision?.title || decision?.decision || '');
+            setField('decisionFolder', decision?.folder || 'LIFE');
+            setField('decisionStatus', decision ? (decision.status || '') : 'DECIDED');
+            setField('decisionDate', decision?.date || new Date().toISOString().split('T')[0]);
+            setField('decisionProject', decision?.projectId || linkedProjectId || '');
+            setField('decisionWhy', decision?.why || decision?.rationale || '');
+            setField('decisionAssumptions', decision?.assumptions || '');
+            setField('decisionRisks', decision?.risks || '');
+            setField('decisionWhatWouldChange', decision?.whatWouldChange || decision?.whatWouldChangeIt || '');
 
             document.getElementById('decisionModal').classList.add('active');
         }
@@ -2753,17 +2778,14 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
 
             if (appState.editingDecisionId) {
                 const decision = appState.decisions.find(d => d.id === appState.editingDecisionId);
-                decision.title = title;
-                decision.folder = document.getElementById('decisionFolder').value;
                 // Status is optional on decisions, and "" isn't a valid value for it.
-                decision.status = document.getElementById('decisionStatus').value || null;
-                decision.date = document.getElementById('decisionDate').value;
-                decision.projectId = document.getElementById('decisionProject').value;
-                decision.why = document.getElementById('decisionWhy').value;
-                decision.assumptions = document.getElementById('decisionAssumptions').value;
-                decision.risks = document.getElementById('decisionRisks').value;
-                decision.whatWouldChange = document.getElementById('decisionWhatWouldChange').value;
-                decision.updated = new Date().toISOString();
+                const changed = writeFields(decision, [
+                    ['title', 'decisionTitle', trimmed], ['folder', 'decisionFolder'],
+                    ['status', 'decisionStatus', (v) => v || null], ['date', 'decisionDate'],
+                    ['projectId', 'decisionProject'], ['why', 'decisionWhy'], ['assumptions', 'decisionAssumptions'],
+                    ['risks', 'decisionRisks'], ['whatWouldChange', 'decisionWhatWouldChange']
+                ]);
+                if (changed) decision.updated = new Date().toISOString();
             } else {
                 appState.decisions.push({
                     id: generateId('D'),
@@ -2787,16 +2809,17 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         }
 
         function openDocModal(docId = null, linkedProjectId = null) {
+            populateProjectSelects();
             appState.editingDocId = docId;
             const doc = docId ? appState.docs.find(d => d.id === docId) : null;
 
             document.getElementById('docModalTitle').textContent = doc ? 'Edit Doc' : 'New Doc';
-            document.getElementById('docTitle').value = doc?.title || '';
-            document.getElementById('docType').value = doc?.type || 'SOP';
-            document.getElementById('docFolder').value = doc?.folder || 'LIFE';
-            document.getElementById('docProject').value = doc?.projectId || linkedProjectId || '';
-            document.getElementById('docUrl').value = doc?.url || '';
-            document.getElementById('docNotes').value = doc?.notes || '';
+            setField('docTitle', doc?.title || '');
+            setField('docType', doc?.type || 'SOP');
+            setField('docFolder', doc?.folder || 'LIFE');
+            setField('docProject', doc?.projectId || linkedProjectId || '');
+            setField('docUrl', doc?.url || '');
+            setField('docNotes', doc?.notes || '');
 
             document.getElementById('docModal').classList.add('active');
         }
@@ -2814,13 +2837,11 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
 
             if (appState.editingDocId) {
                 const doc = appState.docs.find(d => d.id === appState.editingDocId);
-                doc.title = title;
-                doc.type = document.getElementById('docType').value;
-                doc.folder = document.getElementById('docFolder').value;
-                doc.projectId = document.getElementById('docProject').value;
-                doc.url = document.getElementById('docUrl').value;
-                doc.notes = document.getElementById('docNotes').value;
-                doc.updated = new Date().toISOString();
+                const changed = writeFields(doc, [
+                    ['title', 'docTitle', trimmed], ['type', 'docType'], ['folder', 'docFolder'],
+                    ['projectId', 'docProject'], ['url', 'docUrl'], ['notes', 'docNotes']
+                ]);
+                if (changed) doc.updated = new Date().toISOString();
             } else {
                 appState.docs.push({
                     id: generateId('DOC'),
@@ -2841,17 +2862,18 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         }
 
         function openBlockerModal(blockerId = null, linkedProjectId = null) {
+            populateProjectSelects();
             appState.editingBlockerId = blockerId;
             const blocker = blockerId ? appState.blockers.find(b => b.id === blockerId) : null;
 
             document.getElementById('blockerModalTitle').textContent = blocker ? 'Edit Blocker' : 'New Blocker';
-            document.getElementById('blockerTitle').value = blocker?.title || '';
-            document.getElementById('blockerFolder').value = blocker?.folder || 'LIFE';
-            document.getElementById('blockerSeverity').value = blocker?.severity || 'HIGH';
-            setStatusSelect('blockerStatus', blocker?.status || 'OPEN');
-            document.getElementById('blockerProject').value = blocker?.projectId || linkedProjectId || '';
-            document.getElementById('blockerDescription').value = blocker?.description || '';
-            document.getElementById('blockerResolution').value = blocker?.resolution || '';
+            setField('blockerTitle', blocker?.title || '');
+            setField('blockerFolder', blocker?.folder || 'LIFE');
+            setField('blockerSeverity', blocker?.severity || 'HIGH');
+            setField('blockerStatus', blocker?.status || 'OPEN');
+            setField('blockerProject', blocker?.projectId || linkedProjectId || '');
+            setField('blockerDescription', blocker?.description || '');
+            setField('blockerResolution', blocker?.resolution || '');
 
             document.getElementById('blockerModal').classList.add('active');
         }
@@ -2869,16 +2891,16 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
 
             if (appState.editingBlockerId) {
                 const blocker = appState.blockers.find(b => b.id === appState.editingBlockerId);
-                blocker.title = title;
-                blocker.folder = document.getElementById('blockerFolder').value;
-                blocker.severity = document.getElementById('blockerSeverity').value;
-                blocker.status = document.getElementById('blockerStatus').value;
-                blocker.projectId = document.getElementById('blockerProject').value;
-                blocker.description = document.getElementById('blockerDescription').value;
-                blocker.resolution = document.getElementById('blockerResolution').value;
-                blocker.updated = new Date().toISOString();
-                if (blocker.status === 'RESOLVED' && !blocker.resolvedDate) {
-                    blocker.resolvedDate = new Date().toISOString();
+                const changed = writeFields(blocker, [
+                    ['title', 'blockerTitle', trimmed], ['folder', 'blockerFolder'], ['severity', 'blockerSeverity'],
+                    ['status', 'blockerStatus'], ['projectId', 'blockerProject'], ['description', 'blockerDescription'],
+                    ['resolution', 'blockerResolution']
+                ]);
+                if (changed) {
+                    blocker.updated = new Date().toISOString();
+                    if (blocker.status === 'RESOLVED' && !blocker.resolvedDate) {
+                        blocker.resolvedDate = new Date().toISOString();
+                    }
                 }
             } else {
                 appState.blockers.push({
@@ -3005,6 +3027,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             selects.forEach(id => {
                 const select = document.getElementById(id);
                 if (select) {
+                    select.querySelectorAll('option:not([value=""])').forEach(o => o.remove());
                     appState.projects.forEach(project => {
                         const option = document.createElement('option');
                         option.value = project.id;
@@ -3371,7 +3394,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         window.saveToLocalStorage = saveToLocalStorage;
         window.render = render;
     </script>
-    <script type="module" src="cloud-sync.js"></script>
+    <script type="module" src="cloud-sync.js?v=13"></script>
     <script>
         // PWA service worker registration — only runs over http(s), silently skipped on file://
         if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
