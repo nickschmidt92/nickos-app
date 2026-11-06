@@ -1971,7 +1971,7 @@
             if (appState.taskFilters.search) {
                 const search = appState.taskFilters.search.toLowerCase();
                 filtered = filtered.filter(t =>
-                    t.title.toLowerCase().includes(search) ||
+                    (t.title || '').toLowerCase().includes(search) ||
                     (t.originalText && t.originalText.toLowerCase().includes(search))
                 );
             }
@@ -2027,8 +2027,8 @@
                     </div>
                     <div class="task-meta">
                         <span class="folder-badge">${escapeHtml(task.folder)}</span>
-                        <span class="status-badge status-${task.status.toLowerCase()}">${task.status}</span>
-                        <span class="badge priority-${task.priority.toLowerCase()}">${task.priority}</span>
+                        ${task.status ? `<span class="status-badge status-${task.status.toLowerCase()}">${task.status}</span>` : ''}
+                        ${task.priority ? `<span class="badge priority-${task.priority.toLowerCase()}">${task.priority}</span>` : ''}
                         ${task.effort ? `<span class="badge">${task.effort}</span>` : ''}
                         ${task.impact ? `<span class="badge">${task.impact}</span>` : ''}
                         ${task.dueDate ? `<span class="badge">Due: ${task.dueDate}</span>` : ''}
@@ -2056,7 +2056,7 @@
                                 <div style="font-weight:600;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.title)}</div>
                                 <div class="text-sm text-muted">${escapeHtml(t.folder)}</div>
                                 <div class="text-sm" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
-                                    <span class="badge priority-${t.priority.toLowerCase()}">${t.priority}</span>
+                                    ${t.priority ? `<span class="badge priority-${t.priority.toLowerCase()}">${t.priority}</span>` : ''}
                                     ${t.dueDate ? '<span class="badge">Due: ' + t.dueDate + '</span>' : ''}
                                     ${t.projectId ? '<span class="badge">📁</span>' : ''}
                                 </div>
@@ -2216,7 +2216,7 @@
                             <div class="project-title">${escapeHtml(project.title)}</div>
                             <div class="project-meta">
                                 <span class="folder-badge">${escapeHtml(project.folder)}</span>
-                                <span class="status-badge status-${project.status.toLowerCase()}">${project.status}</span>
+                                ${project.status ? `<span class="status-badge status-${project.status.toLowerCase()}">${project.status}</span>` : ''}
                                 ${project.dueDate ? `<span class="badge">Due: ${project.dueDate}</span>` : ''}
                             </div>
                         </div>
@@ -2270,7 +2270,7 @@
                                 ${blockers.map(b => `
                                     <div class="linked-item">
                                         <span>${escapeHtml(b.title)}</span>
-                                        <span class="status-badge status-${b.status.toLowerCase()}">${b.status}</span>
+                                        ${b.status ? `<span class="status-badge status-${b.status.toLowerCase()}">${b.status}</span>` : ''}
                                     </div>
                                 `).join('')}
                             </div>

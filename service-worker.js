@@ -1,6 +1,6 @@
 // NickOS service worker — offline cache for the shell.
 // Bump CACHE_VERSION on every deploy to invalidate old caches.
-const CACHE_VERSION = 'nickos-v10';
+const CACHE_VERSION = 'nickos-v11';
 const SHELL = ['./', './index.html', './manifest.json', './icon.svg', './cloud-sync.js', './v2-sync.js', './merge-by-id.js', './firebase-config.js'];
 
 self.addEventListener('install', (event) => {
