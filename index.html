@@ -1114,6 +1114,9 @@
             /* Forms fill the screen and never scroll sideways. 16px stops iOS zooming in on focus. */
             .modal { width: calc(100vw - 24px); max-width: calc(100vw - 24px); overflow-x: hidden; }
             .modal input, .modal select, .modal textarea { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; font-size: 16px; }
+            /* iOS gives a date field its own width and height unless told not to. */
+            .modal input[type="date"] { -webkit-appearance: none; appearance: none; display: block; height: 38px; }
+            .modal input[type="date"]::-webkit-date-and-time-value { text-align: left; }
             .modal .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
             .modal .form-row > * { min-width: 0; }
         }
@@ -3470,7 +3473,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         window.saveToLocalStorage = saveToLocalStorage;
         window.render = render;
     </script>
-    <script type="module" src="cloud-sync.js?v=21"></script>
+    <script type="module" src="cloud-sync.js?v=22"></script>
     <script>
         // All tabs share one local copy, so an older tab's autosave could overwrite a newer
         // tab's unsaved edits. The newest tab wins; the older one stops and offers to take over.
