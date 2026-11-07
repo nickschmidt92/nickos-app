@@ -1080,6 +1080,43 @@
         body.light-mode .search-result-meta {
             color: #6b7280;
         }
+        /* ═══════ PHONE LAYOUT ═══════ Last, so it wins over the rules above. */
+        .mobile-new-task {
+            display: none;
+            position: fixed;
+            right: 16px;
+            bottom: calc(72px + env(safe-area-inset-bottom));
+            width: 56px;
+            height: 56px;
+            border: 0;
+            border-radius: 50%;
+            background: #6366f1;
+            color: #fff;
+            font-size: 28px;
+            line-height: 1;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+            cursor: pointer;
+            z-index: 98;
+        }
+
+        @media (max-width: 767px) {
+            /* Room for the fixed Synced pill, so it can't cover what's under it. */
+            .page-container { padding-top: 56px; }
+            .mobile-new-task { display: flex; }
+            .page-header .btn.primary[onclick="openTaskModal()"] { display: none; }
+            /* One swipeable row of status filters, so tasks start higher up. */
+            .filter-group { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+            .filter-group .filter-button { flex: 0 0 auto; }
+            /* Room under the last task, so the + button can't sit on its controls. */
+            .page-container { padding-bottom: 148px; }
+            /* Forms fill the screen and never scroll sideways. 16px stops iOS zooming in on focus. */
+            .modal { width: calc(100vw - 24px); max-width: calc(100vw - 24px); overflow-x: hidden; }
+            .modal input, .modal select, .modal textarea { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; font-size: 16px; }
+            .modal .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+            .modal .form-row > * { min-width: 0; }
+        }
     </style>
 </head>
 <body>
@@ -1156,6 +1193,8 @@
                 <!-- PAGES RENDERED HERE -->
             </div>
         </div>
+
+        <button id="mobile-new-task" class="mobile-new-task" onclick="openTaskModal()" aria-label="New task">+</button>
 
         <!-- BOTTOM NAV (MOBILE) -->
         <div class="bottom-nav">
@@ -3431,7 +3470,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         window.saveToLocalStorage = saveToLocalStorage;
         window.render = render;
     </script>
-    <script type="module" src="cloud-sync.js?v=20"></script>
+    <script type="module" src="cloud-sync.js?v=21"></script>
     <script>
         // All tabs share one local copy, so an older tab's autosave could overwrite a newer
         // tab's unsaved edits. The newest tab wins; the older one stops and offers to take over.

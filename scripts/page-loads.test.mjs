@@ -21,3 +21,10 @@ test('the page, its scripts and the service worker agree on one script version',
   assert.ok(cloud.includes(`"./v2-sync.js?v=${version}"`), 'cloud-sync.js');
   assert.ok(sw.includes(`'./cloud-sync.js?v=${version}'`) && sw.includes(`'./v2-sync.js?v=${version}'`), 'SHELL');
 });
+
+test('a phone has a New Task button that is always on screen, and the pill covers nothing (T-01715)', () => {
+  assert.match(html, /id="mobile-new-task"[^>]*onclick="openTaskModal\(\)"/);
+  const phone = html.slice(html.indexOf('PHONE LAYOUT'));
+  assert.match(phone, /\.page-container \{ padding-top: 56px; \}/);
+  assert.match(phone, /\.mobile-new-task \{ display: flex; \}/);
+});
