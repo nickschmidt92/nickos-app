@@ -30,7 +30,7 @@ import {
 
 import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js";
 import { mergeById } from "./merge-by-id.js";
-import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=17";
+import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=18";
 
 const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
 const POLL_MS = 60000;
@@ -288,10 +288,23 @@ async function startV2() {
   } finally {
     loadRunning = false;
   }
-  if (!pollTimer) {
-    pollTimer = setInterval(pollNow, POLL_MS);
-    window.addEventListener('focus', pollNow);
-  }
+  startPolling();
+}
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(pollNow, POLL_MS);
+  window.addEventListener('focus', pollNow);
+}
+
+// The red pill's way out when a retry keeps failing. Keeps the edits, takes the server's copy.
+async function setAsideAndReload() {
+  if (cloud.pushing || !confirm('Set these edits aside and reload from NickOS? They are not saved, but stay on this device under "set aside".')) return;
+  cloud.pushing = true;
+  try {
+    await v2.setAsideAndReload();
+    if (v2.loaded && !hasUnsaved()) { clearLoadRetry(); startPolling(); }
+  } finally { cloud.pushing = false; }
 }
 
 function stopV2() {
@@ -521,9 +534,12 @@ function renderAuthUI() {
       inner = `${dot('#ef4444')} <span style="line-height:1.3;">Not authorized. Wrong Apple account?</span> <button id="cloud-signout-btn" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Sign out</button>`;
       break;
   }
+  if (v2 && cloud.user && cloud.status === 'save-failed') inner += ` <button id="cloud-setaside-reload-btn" style="all:unset;cursor:pointer;text-decoration:underline;font-size:11px;">Set aside and reload</button>`;
   const parked = v2 ? v2.setAsideEdits().length : 0;
   if (parked) inner += ` <button id="cloud-setaside-btn" style="all:unset;cursor:pointer;text-decoration:underline;font-size:11px;">${parked} set aside</button>`;
   host.innerHTML = inner;
+  const reloadEl = document.getElementById('cloud-setaside-reload-btn');
+  if (reloadEl) reloadEl.addEventListener('click', (e) => { e.stopPropagation(); setAsideAndReload(); });
   const parkedEl = document.getElementById('cloud-setaside-btn');
   if (parkedEl) parkedEl.addEventListener('click', (e) => { e.stopPropagation(); showSetAside(); });
 

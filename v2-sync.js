@@ -27,6 +27,8 @@ const SET_ASIDE_MAX = 5;
 const PENDING = 'nickos_v2_pending';
 const KEEPALIVE_MAX_BYTES = 60000; // browsers refuse keepalive bodies over 64 KB
 const ITEM_ERRORS = new Set([400, 404, 422]); // this record is the problem, not the connection
+// The API and the app both fill these in, so two devices differing here isn't a conflict.
+const STAMPED = new Set(['lastTouchedDate', 'completedDate', 'droppedDate', 'resolvedDate']);
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 const copy = (x) => JSON.parse(JSON.stringify(x));
@@ -91,7 +93,7 @@ export function createFields(item, writable) {
 
 /** After a version conflict: fields Nick changed that someone else also changed differently. */
 export function overlappingFields(before, server, patch) {
-  return Object.keys(patch).filter((k) => !same(server[k], before[k]) && !same(server[k], patch[k]));
+  return Object.keys(patch).filter((k) => !STAMPED.has(k) && !same(server[k], before[k]) && !same(server[k], patch[k]));
 }
 
 export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, onStatus, render, isBusy = () => false, saveLocal = () => {}, log = console }) {
@@ -114,6 +116,8 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
 
   function markUnsaved() {
     try {
+      // The copy first: a rebased base beside the old copy reverts the other device's edit.
+      saveLocal();
       storage.setItem(BASE, baseJson());
       storage.setItem(UNSAVED, '1');
     } catch (e) { log.error('[v2-sync] could not persist unsaved state:', e); }
@@ -573,6 +577,40 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     await push({ localWins: true });
   }
 
+  /**
+   * The way out when a retry can never work, such as a create the server refuses: keep what
+   * differs where Nick can see it, then take the server's copy. Sends nothing. If the server
+   * can't be read or the edits can't be kept, nothing changes and the pill stays red.
+   */
+  async function setAsideAndReload() {
+    if (pushing) return;
+    let body;
+    try {
+      body = await call('GET', '/all');
+    } catch (e) {
+      log.error('[v2-sync] set aside could not load:', e);
+      status('save-failed', e.message || String(e));
+      return;
+    }
+    if (pushing) return;
+    // Against the copy the edits were made from, so the other device's edits aren't listed.
+    const edits = localDifferences(base ? JSON.parse(baseJson()) : body.data);
+    if (Object.keys(edits).length && !setAside('Edits set aside so sync could continue', edits)) {
+      status('save-failed', 'Could not keep the edits on this device, so nothing was changed.');
+      return;
+    }
+    writable = Object.fromEntries(ENTITIES.map((e) => [e, new Set(body.writable[e] || [])]));
+    clearUnsaved();
+    applyAll(body);
+    loaded = true;
+    boot = null;
+    needsRefresh = false;
+    massDeletes = [];
+    saveLocal();
+    status('signed-in');
+    render();
+  }
+
   /** Nick reviewed the list and wants these records deleted. */
   async function confirmMassDelete() {
     await push({ localWins: true, allowMassDelete: true });
@@ -631,7 +669,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   }
 
   return {
-    load, push, retry, poll, captureBoot, noteEdit, signedOut, confirmMassDelete, restoreMassDelete,
+    load, push, retry, poll, captureBoot, noteEdit, signedOut, setAsideAndReload, confirmMassDelete, restoreMassDelete,
     setAsideEdits: readSetAside, dismissSetAside,
     getRecord: async (entity, id) => (await call('GET', `/get?entity=${entity}&id=${encodeURIComponent(id)}`)).record,
     get loaded() { return loaded; },
