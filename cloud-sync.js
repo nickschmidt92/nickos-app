@@ -30,7 +30,7 @@ import {
 
 import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js";
 import { mergeById } from "./merge-by-id.js";
-import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=14";
+import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=16";
 
 const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
 const POLL_MS = 60000;
@@ -82,13 +82,14 @@ const cloud = {
 
   async signIn() {
     try {
-      // Popup works in Chrome/Safari desktop; mobile Safari sometimes blocks
-      // popups for third-party auth — fall back to redirect there.
-      const isMobileSafari = /iPhone|iPad|iPod/.test(navigator.userAgent);
-      if (isMobileSafari) {
-        await signInWithRedirect(auth, appleProvider);
-      } else {
+      // A popup everywhere. A redirect returns signed out on iPhone Safari: its storage is
+      // blocked across the github.io and firebaseapp.com domains, so the result is lost.
+      // A redirect is kept only for a browser that refuses the popup outright.
+      try {
         await signInWithPopup(auth, appleProvider);
+      } catch (e) {
+        if (e?.code !== 'auth/popup-blocked') throw e;
+        await signInWithRedirect(auth, appleProvider);
       }
     } catch (e) {
       cloud.status = 'error';
