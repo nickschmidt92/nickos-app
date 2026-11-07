@@ -142,8 +142,14 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     } catch (_) { return []; }
   }
 
-  function setAside(reason, data) {
-    const list = [{ at: new Date().toISOString(), reason, data }, ...readSetAside()].slice(0, SET_ASIDE_MAX);
+  function setAside(reason, data, { keepAll = false } = {}) {
+    const all = [{ at: new Date().toISOString(), reason, data }, ...readSetAside()];
+    // When Nick is choosing to set edits aside, refuse rather than drop an older entry.
+    if (keepAll) {
+      if (all.length > SET_ASIDE_MAX) return false;
+      try { storage.setItem(ORPHAN, JSON.stringify(all)); return true; } catch (_) { return false; }
+    }
+    const list = all.slice(0, SET_ASIDE_MAX);
     // Browser storage is limited, and the app's own copy lives there too: drop the oldest first.
     while (list.length) {
       try { storage.setItem(ORPHAN, JSON.stringify(list)); return true; } catch (_) { list.pop(); }
@@ -433,7 +439,10 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         }
         if (local) {
           for (const k of Object.keys(local)) if (!(k in server) && !(k in u.patch)) delete local[k];
-          Object.assign(local, copy(server), copy(u.patch));
+          // The server's stamped date stands if it changed: the first finish keeps its date.
+          const mine = copy(u.patch);
+          for (const k of STAMPED) if (k in mine && !same(server[k], was?.[k])) delete mine[k];
+          Object.assign(local, copy(server), mine);
         }
       }
     }
@@ -600,10 +609,26 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
       return;
     }
     if (pushing) return;
+    // An empty answer with a full local copy means the wrong target, not an empty life.
+    const state = getState();
+    if (!ENTITIES.some((e) => (body.data[e] || []).length) && ENTITIES.some((e) => (state[e] || []).length)) {
+      status('save-failed', 'The server returned no records. Keeping the local copy.');
+      return;
+    }
     // Against the copy the edits were made from, so the other device's edits aren't listed.
     const edits = localDifferences(base ? JSON.parse(baseJson()) : body.data);
-    if (Object.keys(edits).length && !setAside('Edits set aside so sync could continue', edits)) {
-      status('save-failed', 'Could not keep the edits on this device, so nothing was changed.');
+    // A record removed here comes back with the reload, so list the delete instead of losing it.
+    if (base) {
+      for (const e of ENTITIES) {
+        if (!Array.isArray(state[e])) continue;
+        const here = new Set(state[e].map((r) => r && r.id));
+        const removed = [...base[e].values()].filter((r) => !here.has(r.id))
+          .map((r) => ({ id: r.id, title: r.title, deletedLocally: true }));
+        if (removed.length) edits[e] = [...(edits[e] || []), ...removed];
+      }
+    }
+    if (Object.keys(edits).length && !setAside('Edits set aside so sync could continue', edits, { keepAll: true })) {
+      status('save-failed', 'The set aside list is full or this device is out of room. Download and dismiss older entries, then try again.');
       return;
     }
     writable = Object.fromEntries(ENTITIES.map((e) => [e, new Set(body.writable[e] || [])]));
