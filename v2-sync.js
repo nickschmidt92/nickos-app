@@ -28,6 +28,7 @@ const PENDING = 'nickos_v2_pending';
 const KEEPALIVE_MAX_BYTES = 60000; // browsers refuse keepalive bodies over 64 KB
 const ITEM_ERRORS = new Set([400, 404, 422]); // this record is the problem, not the connection
 // The API and the app both fill these in, so two devices differing here isn't a conflict.
+const FINISHED = new Set(['DONE', 'COMPLETED']);
 const STAMPED = new Set(['lastTouchedDate', 'completedDate', 'droppedDate', 'resolvedDate']);
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -423,7 +424,13 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         if (overlap.length) { conflicts.push(`${u.id} (${overlap.join(', ')})`); continue; }
         // Take the server's copy as the new base and keep only Nick's patch on top, so
         // the next pass sends the same change against the current version.
+        const was = base[entity].get(u.id);
         base[entity].set(u.id, copy(server));
+        // Finishing a recurring task may have saved without making its next instance, so this
+        // device still has to say so. The server makes one per due date, so this can't double it.
+        if (server.recurrence && same(server.status, u.patch.status) && FINISHED.has(String(server.status).toUpperCase())) {
+          base[entity].get(u.id).status = was?.status ?? null;
+        }
         if (local) {
           for (const k of Object.keys(local)) if (!(k in server) && !(k in u.patch)) delete local[k];
           Object.assign(local, copy(server), copy(u.patch));
