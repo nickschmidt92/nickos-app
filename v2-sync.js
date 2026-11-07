@@ -262,6 +262,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
       try { saved = JSON.parse(storage.getItem(BASE) || 'null'); } catch (_) {}
       if (saved) {
         base = toMaps(saved);
+        fillVersions(body.data);
         since = stepBack(body.serverTime);
         loaded = true;
         needsRefresh = true;
@@ -297,6 +298,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
       }
       if (from) {
         base = toMaps(from);
+        fillVersions(body.data);
         since = stepBack(body.serverTime);
         loaded = true;
         boot = null;
@@ -313,6 +315,29 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     if (setAsideNow) status('save-failed', 'Earlier edits were not saved. Tap "set aside" to see them.');
     else status('signed-in');
     render();
+  }
+
+  /**
+   * A copy from before versions existed has none, and the API refuses the whole batch for one
+   * missing. Take them from the server. A record it no longer holds can't be saved or recreated.
+   */
+  function fillVersions(serverData) {
+    const state = getState();
+    for (const e of ENTITIES) {
+      const server = new Map((serverData[e] || []).map((r) => [r.id, r]));
+      for (const [id, record] of base[e]) {
+        if (record.versionSys != null) continue;
+        const s = server.get(id);
+        if (s) { record.versionSys = s.versionSys; continue; }
+        base[e].delete(id);
+        const list = state[e] || [];
+        const at = list.findIndex((x) => x && x.id === id);
+        if (at >= 0) {
+          setAside(`${id} from an old local copy is no longer on the server`, { [e]: [list[at]] });
+          list.splice(at, 1);
+        }
+      }
+    }
   }
 
   function remapRefs(from, to) {
@@ -333,16 +358,29 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     // On a replay an earlier attempt made the record, so what this attempt sent wasn't stored.
     const sent = made.replayed ? createFields(item, writable[entity]) : null;
     const { record } = await call('GET', `/get?entity=${entity}&id=${encodeURIComponent(made.id)}`);
+    const live = !record.lifecycleSys || record.lifecycleSys === 'LIVE';
+    // Changed or removed elsewhere since that attempt. Its copy wins: keep this edit where Nick
+    // can see it, because the difference could be the other device's edit, not a later one here.
+    const superseded = sent && (!live || record.versionSys > 1);
+    if (superseded) {
+      setAside(`${record.id} changed on another device before this edit saved, so it was not applied`, { [entity]: [copy(item)] });
+    }
+    remapRefs(localId, record.id);
+    if (!live) {
+      const list = getState()[entity] || [];
+      const at = list.indexOf(item);
+      if (at >= 0) list.splice(at, 1);
+      return;
+    }
     // The app now holds exactly what the server stored, as it will after a reload.
     for (const k of Object.keys(item)) if (!(k in record)) delete item[k];
     Object.assign(item, copy(record));
     base[entity].set(record.id, copy(record));
     // Put Nick's later edits back on top, so the next pass sends them as an update.
-    if (sent) {
+    if (sent && !superseded) {
       for (const k of writable[entity]) if (k in record && !(k in sent)) delete item[k];
       Object.assign(item, copy(sent));
     }
-    remapRefs(localId, record.id);
   }
 
   async function sendUpdates(entity, updates, conflicts, failures, { localWins }) {
@@ -364,7 +402,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
           continue;
         }
         // One bad record must not hold back every edit after it.
-        if (r.code !== 'VERSION_CONFLICT') { failures.push(`${u.id}: ${r.error}`); continue; }
+        if (r.code !== 'VERSION_CONFLICT' && r.code !== 'NOT_LIVE') { failures.push(`${u.id}: ${r.error}`); continue; }
         const { record: server } = await call('GET', `/get?entity=${entity}&id=${encodeURIComponent(u.id)}`);
         // Archived or deleted elsewhere: an edit reapplied here would show green and be gone
         // on reload. Take the record out, as a poll would, and keep the edit where Nick sees it.
