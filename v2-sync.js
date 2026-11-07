@@ -35,6 +35,23 @@ const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 const copy = (x) => JSON.parse(JSON.stringify(x));
 const blank = (v) => v === '' || v === null || v === undefined || (Array.isArray(v) && !v.length);
 
+/** Fields that differ, with undefined for one removed. System fields and the id aren't edits. */
+function changedFields(before, after) {
+  const out = {};
+  for (const k of new Set([...Object.keys(before || {}), ...Object.keys(after || {})])) {
+    if (k.endsWith('Sys') || k === 'id' || same(before?.[k], after?.[k])) continue;
+    if (blank(before?.[k]) && blank(after?.[k])) continue;
+    out[k] = after[k] === undefined ? undefined : copy(after[k]);
+  }
+  return out;
+}
+
+function applyFields(target, fields) {
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined) delete target[k]; else target[k] = v;
+  }
+}
+
 function fnv(s) {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
@@ -363,6 +380,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   async function sendCreate(entity, item) {
     if (item.id == null) item.id = `LOCAL-${Date.now().toString(36)}-${fnv(JSON.stringify(item))}`;
     const localId = item.id;
+    const asSent = copy(item);
     const made = await call('POST', '/add', {
       entity, fields: createFields(item, writable[entity]), idempotencyKey: `web-add-${entity}-${localId}`
     });
@@ -383,6 +401,8 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
       if (at >= 0) list.splice(at, 1);
       return;
     }
+    // Anything changed while this was saving, such as tapping Done, is a later edit to keep.
+    const during = changedFields(asSent, item);
     // The app now holds exactly what the server stored, as it will after a reload.
     for (const k of Object.keys(item)) if (!(k in record)) delete item[k];
     Object.assign(item, copy(record));
@@ -392,6 +412,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
       for (const k of writable[entity]) if (k in record && !(k in sent)) delete item[k];
       Object.assign(item, copy(sent));
     }
+    if (!superseded) applyFields(item, during);
   }
 
   async function sendUpdates(entity, updates, conflicts, failures, { localWins }) {
@@ -426,23 +447,25 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
           failures.push(`${u.id}: changed elsewhere and no longer live. Your edit was set aside.`);
           continue;
         }
-        const overlap = localWins ? [] : overlappingFields(base[entity].get(u.id), server, u.patch);
+        // Everything edited since the last server copy: the patch, and anything typed since it was sent.
+        const was = base[entity].get(u.id);
+        const mine = local ? changedFields(was, local) : copy(u.patch);
+        const overlap = localWins ? [] : overlappingFields(was, server, mine);
         if (overlap.length) { conflicts.push(`${u.id} (${overlap.join(', ')})`); continue; }
         // Take the server's copy as the new base and keep only Nick's patch on top, so
         // the next pass sends the same change against the current version.
-        const was = base[entity].get(u.id);
         base[entity].set(u.id, copy(server));
         // Finishing a recurring task may have saved without making its next instance, so this
-        // device still has to say so. The server makes one per due date, so this can't double it.
+        // device still has to say so. The server makes one per task, so this can't double it.
         if (server.recurrence && same(server.status, u.patch.status) && FINISHED.has(String(server.status).toUpperCase())) {
           base[entity].get(u.id).status = was?.status ?? null;
         }
         if (local) {
-          for (const k of Object.keys(local)) if (!(k in server) && !(k in u.patch)) delete local[k];
+          for (const k of Object.keys(local)) if (!(k in server) && !(k in mine)) delete local[k];
           // The server's stamped date stands if it changed: the first finish keeps its date.
-          const mine = copy(u.patch);
           for (const k of STAMPED) if (k in mine && !same(server[k], was?.[k])) delete mine[k];
-          Object.assign(local, copy(server), mine);
+          Object.assign(local, copy(server));
+          applyFields(local, mine);
         }
       }
     }
