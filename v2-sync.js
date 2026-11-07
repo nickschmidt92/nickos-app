@@ -330,11 +330,18 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     const made = await call('POST', '/add', {
       entity, fields: createFields(item, writable[entity]), idempotencyKey: `web-add-${entity}-${localId}`
     });
+    // On a replay an earlier attempt made the record, so what this attempt sent wasn't stored.
+    const sent = made.replayed ? createFields(item, writable[entity]) : null;
     const { record } = await call('GET', `/get?entity=${entity}&id=${encodeURIComponent(made.id)}`);
     // The app now holds exactly what the server stored, as it will after a reload.
     for (const k of Object.keys(item)) if (!(k in record)) delete item[k];
     Object.assign(item, copy(record));
     base[entity].set(record.id, copy(record));
+    // Put Nick's later edits back on top, so the next pass sends them as an update.
+    if (sent) {
+      for (const k of writable[entity]) if (k in record && !(k in sent)) delete item[k];
+      Object.assign(item, copy(sent));
+    }
     remapRefs(localId, record.id);
   }
 
