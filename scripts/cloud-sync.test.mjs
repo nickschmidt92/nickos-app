@@ -40,8 +40,8 @@ test('renderAuthUI has a save-failed pill that retries on click', () => {
   assert.ok(renderBody.includes("host.onclick = () => { if (cloud.status === 'save-failed' && !cloud.pushing) cloud.retryUnsaved(); };"));
 });
 
-test("service worker cache version is 'nickos-v22' and precaches merge-by-id.js", () => {
-  assert.match(sw, /CACHE_VERSION\s*=\s*'nickos-v22'/);
+test("service worker cache version is 'nickos-v23' and precaches merge-by-id.js", () => {
+  assert.match(sw, /CACHE_VERSION\s*=\s*'nickos-v23'/);
   assert.match(sw, /const SHELL = \[[^\]]*'\.\/merge-by-id\.js'/);
 });
 
