@@ -10,6 +10,12 @@
 // behaviour (audit §11): a newer non-web edit to the same field is never overwritten
 // without Nick having been shown THAT edit. Tests named "DEFECT:" fail today on purpose.
 import { test } from 'node:test';
+
+// A DEFECT test reproduces a known, still-open defect and is EXPECTED to fail until it is fixed.
+// It runs and reports as a failing `todo`, so the defect stays visible without turning the
+// gate / CI red and hiding real regressions (review R2, 2026-11-10). When the fix lands,
+// change `defect(` back to `test(` in the same commit.
+const defect = (name, fn) => test(name, { todo: 'known defect — reproduced on purpose; see 09 DF register' }, fn);
 import assert from 'node:assert/strict';
 import { createV2Sync, ENTITIES } from '../v2-sync.js';
 
@@ -123,7 +129,7 @@ test('baseline: a same-field conflict goes red, names the field, and overwrites 
   assert.equal(s.api.db.tasks.get('T-1').status, 'DONE', 'the agent\'s resolution stands until Nick decides');
 });
 
-test('DEFECT: the tap overwrites an agent edit that landed AFTER the conflict Nick was shown', async () => {
+defect('DEFECT: the tap overwrites an agent edit that landed AFTER the conflict Nick was shown', async () => {
   const s = await setup({ tasks: [T(1)] });
   // Conflict #1: Nick is shown "T-1 (status)" against the agent's IN_PROGRESS.
   await agentEdit(s.api, 'tasks', 'T-1', { status: 'IN_PROGRESS' });
@@ -144,7 +150,7 @@ test('DEFECT: the tap overwrites an agent edit that landed AFTER the conflict Ni
   assert.equal(r.notes, 'RESOLVED by agent: root cause fixed in PR #51', 'a field Nick never edited must survive regardless');
 });
 
-test('DEFECT: unsaved edits from an earlier session overwrite a newer agent edit on the first tap, with no field named', async () => {
+defect('DEFECT: unsaved edits from an earlier session overwrite a newer agent edit on the first tap, with no field named', async () => {
   // Session 1: Nick sets T-1 to WAITING offline; it stays red and unsaved.
   const a = await setup({ tasks: [T(1)] });
   a.api.down = true;
@@ -169,7 +175,7 @@ test('DEFECT: unsaved edits from an earlier session overwrite a newer agent edit
     'no field-level warning that someone else had changed status');
 });
 
-test('DEFECT: the tap also overrides a conflict on a DIFFERENT record that was never shown', async () => {
+defect('DEFECT: the tap also overrides a conflict on a DIFFERENT record that was never shown', async () => {
   const s = await setup({ tasks: [T(1), T(2)] });
   // A shown conflict on T-1 makes the pill red.
   await agentEdit(s.api, 'tasks', 'T-1', { title: 'agent title' });
