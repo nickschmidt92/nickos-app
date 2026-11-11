@@ -40,9 +40,9 @@ test('renderAuthUI has a save-failed pill that retries on click', () => {
   assert.ok(renderBody.includes("host.onclick = () => { if (cloud.status === 'save-failed' && !cloud.pushing) cloud.retryUnsaved(); };"));
 });
 
-test("service worker cache version is 'nickos-v23' and precaches merge-by-id.js", () => {
-  assert.match(sw, /CACHE_VERSION\s*=\s*'nickos-v23'/);
-  assert.match(sw, /const SHELL = \[[^\]]*'\.\/merge-by-id\.js'/);
+test("service worker cache version is 'nickos-v25' and precaches merge-by-id.js", () => {
+  assert.match(sw, /CACHE_VERSION\s*=\s*'nickos-v25'/);
+  assert.match(sw, /const SHELL = \[[^\]]*'\.\/merge-by-id\.js\?v=25'/);
 });
 
 const authBody = src.slice(src.indexOf('onAuthStateChanged(auth'), src.indexOf('getRedirectResult(auth)'));
@@ -118,7 +118,7 @@ test('getDocFromServer is imported from the same Firestore SDK module as setDoc 
 });
 
 test('cloud-sync imports mergeById from ./merge-by-id.js', () => {
-  assert.match(src, /import \{ mergeById \} from "\.\/merge-by-id\.js";/);
+  assert.match(src, /import \{ mergeById \} from "\.\/merge-by-id\.js\?v=25";/);
 });
 
 test('retryUnsaved reads the server (not the cache) before pushing, and merges by id', () => {

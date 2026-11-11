@@ -765,7 +765,7 @@ test('the retry tap reaches a visible confirmation, and the failure text is on t
   assert.match(src, /window\.confirm\(/);
   assert.match(src, /escapeHtml\(cloud\.lastSaveError\)/);
   assert.doesNotMatch(src, /title="\$\{\(cloud\.lastSaveError/);
-  assert.match(readFileSync(new URL('../v2-sync.js', import.meta.url), 'utf8'), /async function retry[\s\S]*?await push\(\{ localWins: true \}\);/);
+  assert.match(readFileSync(new URL('../v2-sync.js', import.meta.url), 'utf8'), /async function retry[\s\S]*?await push\(\{ consent \}\);/);
 });
 
 test('sync waits for the local copy before it can load or sign out', () => {
@@ -947,4 +947,148 @@ test('a lost create retried with no edit sends no update', async () => {
   const { server, api } = await lostCreateThenEdit(() => {});
   assert.equal(server.versionSys, 1);
   assert.ok(!api.calls.some((c) => String(c.path || c).includes('batchUpdate')));
+});
+
+// ── DF-18 (P4): the tap keeps Nick's copy only for the conflicts it showed him ──────────
+// Ported from the DEFECT tests in edit/web-reliability-tests (reliability-concurrency).
+
+/** An agent (plugin / V2 MCP) writing through the API with the version it just read. */
+async function agentEdit(api, entity, id, patch) {
+  const cur = api.db[entity].get(id);
+  const res = await api.fetchImpl('https://api.test/batchUpdate', {
+    method: 'POST', headers: { Authorization: 'Bearer agent' },
+    body: JSON.stringify({ updates: [{ entity, id, patch, expectedVersion: cur.versionSys, idempotencyKey: `agent-${id}-${cur.versionSys}` }] })
+  });
+  const body = await res.json();
+  assert.equal(body.results[0].ok, true, 'fixture: the agent write itself must land');
+  return body.results[0].versionSys;
+}
+
+test('DF-18: the tap does not overwrite an agent edit that landed after the conflict Nick was shown', async () => {
+  const s = await setup({ tasks: [T(1)] });
+  await agentEdit(s.api, 'tasks', 'T-1', { status: 'IN_PROGRESS' });
+  s.state.tasks[0].status = 'WAITING';
+  await s.sync.push();
+  assert.match(s.last()[1], /T-1 \(status\)/);
+  const shownAt = s.api.db.tasks.get('T-1').versionSys;
+  // Before Nick taps, the agent closes the task: an edit Nick never saw.
+  await agentEdit(s.api, 'tasks', 'T-1', { status: 'DONE', notes: 'RESOLVED by agent: root cause fixed in PR #51' });
+  assert.equal(s.api.db.tasks.get('T-1').versionSys, shownAt + 1);
+  await s.sync.retry();
+  const r = s.api.db.tasks.get('T-1');
+  assert.equal(r.status, 'DONE');
+  assert.equal(r.notes, 'RESOLVED by agent: root cause fixed in PR #51');
+  assert.equal(s.last()[0], 'save-failed');
+  assert.match(s.last()[1], /Changed elsewhere again since you saw it: T-1 \(status\)\. Review before retrying/);
+  // The second tap is consent to the version it now shows.
+  await s.sync.retry();
+  assert.equal(s.api.db.tasks.get('T-1').status, 'WAITING');
+  assert.equal(s.api.db.tasks.get('T-1').notes, 'RESOLVED by agent: root cause fixed in PR #51');
+  assert.equal(s.last()[0], 'signed-in');
+});
+
+test('DF-18: unsaved edits from an earlier session name the conflict before any overwrite', async () => {
+  const a = await setup({ tasks: [T(1)] });
+  a.api.down = true;
+  a.state.tasks[0].status = 'WAITING';
+  await a.sync.push();
+  a.api.down = false;
+  await agentEdit(a.api, 'tasks', 'T-1', { status: 'DONE' });
+  const statuses = [];
+  const state = { tasks: a.state.tasks };
+  const sync = createV2Sync({ apiBase: 'https://api.test', getToken: async () => 't', getState: () => state, storage: a.storage, fetchImpl: a.api.fetchImpl, onStatus: (x, y) => statuses.push([x, y]), render() {}, log: { warn() {}, error() {} } });
+  await sync.load();
+  assert.equal(statuses.at(-1)[0], 'save-failed');
+  await sync.retry();
+  assert.equal(a.api.db.tasks.get('T-1').status, 'DONE', 'nothing about T-1 had been shown, so the first tap must not overwrite it');
+  assert.match(statuses.at(-1)[1], /T-1 \(status\)/);
+  await sync.retry();
+  assert.equal(a.api.db.tasks.get('T-1').status, 'WAITING');
+  assert.equal(statuses.at(-1)[0], 'signed-in');
+});
+
+test('DF-18: the tap does not override a conflict on a different record that was never shown', async () => {
+  const s = await setup({ tasks: [T(1), T(2)] });
+  await agentEdit(s.api, 'tasks', 'T-1', { title: 'agent title' });
+  s.state.tasks[0].title = 'nick title';
+  await s.sync.push();
+  assert.match(s.last()[1], /T-1 \(title\)/);
+  assert.doesNotMatch(s.last()[1], /T-2/);
+  s.state.tasks[1].status = 'WAITING';
+  await agentEdit(s.api, 'tasks', 'T-2', { status: 'DONE' });
+  await s.sync.retry();
+  assert.equal(s.api.db.tasks.get('T-2').status, 'DONE');
+  assert.equal(s.api.db.tasks.get('T-1').title, 'nick title', 'the conflict Nick was shown is kept his way in the same tap');
+  assert.match(s.last()[1], /Also changed elsewhere: T-2 \(status\)/);
+  assert.doesNotMatch(s.last()[1], /T-1/);
+});
+
+test('DF-18: consent covers only the fields shown; a newly overlapping field re-prompts', async () => {
+  const s = await setup({ tasks: [T(1, { notes: 'orig' })] });
+  await agentEdit(s.api, 'tasks', 'T-1', { title: 'agent title', notes: 'agent notes' });
+  s.state.tasks[0].title = 'nick title';
+  await s.sync.push();
+  assert.match(s.last()[1], /T-1 \(title\)/);
+  s.state.tasks[0].notes = 'nick notes'; // edited after the warning; the agent changed it too
+  await s.sync.retry();
+  assert.equal(s.api.db.tasks.get('T-1').notes, 'agent notes');
+  assert.equal(s.api.db.tasks.get('T-1').title, 'agent title');
+  assert.match(s.last()[1], /T-1 \(title, notes\)/);
+});
+
+test('DF-18: a tap after a pure network failure replays exactly once, with the same key and version', async () => {
+  const s = await setup({ tasks: [T(1)] });
+  const real = s.api.fetchImpl;
+  const sent = [];
+  let lose = true;
+  // The server stores the update but the reply never arrives.
+  s.api.fetchImpl = async (url, init) => {
+    if (url.includes('/batchUpdate')) {
+      sent.push(JSON.parse(init.body).updates.map((u) => [u.idempotencyKey, u.expectedVersion]));
+      const res = await real(url, init);
+      if (lose) { lose = false; throw new Error('connection lost after send'); }
+      return res;
+    }
+    return real(url, init);
+  };
+  const statuses = [];
+  const sync = createV2Sync({ apiBase: 'https://api.test', getToken: async () => 't', getState: () => s.state, storage: s.storage, fetchImpl: (...a) => s.api.fetchImpl(...a), onStatus: (x, y) => statuses.push([x, y]), render() {}, log: { warn() {}, error() {} } });
+  await sync.load();
+  s.state.tasks[0].title = 'once';
+  await sync.push();
+  assert.equal(statuses.at(-1)[0], 'save-failed');
+  await sync.retry();
+  assert.equal(statuses.at(-1)[0], 'signed-in');
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1], sent[0], 'the retry resends the same idempotency key and expected version');
+  const r = s.api.db.tasks.get('T-1');
+  assert.equal(r.title, 'once');
+  assert.equal(r.versionSys, 2, 'applied once, the resend was a replay');
+});
+
+test('DF-18: a tap after a network failure never overrides a same-field edit made meanwhile', async () => {
+  const s = await setup({ tasks: [T(1)] });
+  s.api.down = true;
+  s.state.tasks[0].status = 'WAITING';
+  await s.sync.push();
+  assert.match(s.last()[1], /offline/);
+  s.api.down = false;
+  await agentEdit(s.api, 'tasks', 'T-1', { status: 'DONE' });
+  await s.sync.retry();
+  assert.equal(s.api.db.tasks.get('T-1').status, 'DONE');
+  assert.match(s.last()[1], /T-1 \(status\)/);
+});
+
+test('DF-18: confirming a mass delete does not override a conflict that was never shown', async () => {
+  const many = Array.from({ length: MASS_DELETE_LIMIT + 1 }, (_, i) => T(i));
+  const s = await setup({ tasks: many, blockers: [{ id: 'B-1', title: 'b', status: 'OPEN' }] });
+  s.state.tasks = [];
+  await s.sync.push();
+  assert.match(s.last()[1], /Refusing to delete 21 tasks/);
+  s.state.blockers[0].status = 'RESOLVED';
+  await agentEdit(s.api, 'blockers', 'B-1', { status: 'DROPPED' });
+  await s.sync.confirmMassDelete();
+  assert.ok([...s.api.db.tasks.values()].every((r) => r.lifecycleSys === 'DELETED'));
+  assert.equal(s.api.db.blockers.get('B-1').status, 'DROPPED');
+  assert.match(s.last()[1], /B-1 \(status\)/);
 });
