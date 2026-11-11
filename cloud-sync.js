@@ -30,7 +30,7 @@ import {
 
 import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js";
 import { mergeById } from "./merge-by-id.js";
-import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=23";
+import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=24";
 
 const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
 const POLL_MS = 60000;

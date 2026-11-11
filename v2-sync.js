@@ -126,6 +126,11 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   let boot = null;
   let needsRefresh = false;
   let massDeletes = [];
+  // The conflicts the red pill is showing now: { entity, id, versionShown, fields }. The tap
+  // keeps Nick's copy for exactly these. A newer version, another field, or a record not
+  // listed here was never shown to him, so it goes back to him instead of being overwritten.
+  let shown = [];
+  let overridden = 0; // conflicts the tap's consent rebased this pass; they still need sending
 
   const status = (s, err) => onStatus(s, err || null);
   const hasUnsaved = () => { try { return storage.getItem(UNSAVED) === '1'; } catch (_) { return false; } };
@@ -415,7 +420,11 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     if (!superseded) applyFields(item, during);
   }
 
-  async function sendUpdates(entity, updates, conflicts, failures, { localWins }) {
+  /** Nick was shown this conflict, at this version, and every field in it, and tapped to keep his. */
+  const consented = (consent, entity, id, version, fields) => (consent || []).some((c) =>
+    c.entity === entity && c.id === id && c.versionShown === version && fields.every((f) => c.fields.includes(f)));
+
+  async function sendUpdates(entity, updates, conflicts, failures, { consent }) {
     for (let i = 0; i < updates.length; i += BATCH) {
       const chunk = updates.slice(i, i + BATCH);
       const res = await call('POST', '/batchUpdate', {
@@ -450,8 +459,14 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         // Everything edited since the last server copy: the patch, and anything typed since it was sent.
         const was = base[entity].get(u.id);
         const mine = local ? changedFields(was, local) : copy(u.patch);
-        const overlap = localWins ? [] : overlappingFields(was, server, mine);
-        if (overlap.length) { conflicts.push(`${u.id} (${overlap.join(', ')})`); continue; }
+        const overlap = overlappingFields(was, server, mine);
+        if (overlap.length && !consented(consent, entity, u.id, server.versionSys, overlap)) {
+          // Shown before, but it has changed again since: say so, so the next tap is informed.
+          const again = (consent || []).some((c) => c.entity === entity && c.id === u.id);
+          conflicts.push({ entity, id: u.id, versionShown: server.versionSys, fields: overlap, again });
+          continue;
+        }
+        if (overlap.length) overridden++;
         // Take the server's copy as the new base and keep only Nick's patch on top, so
         // the next pass sends the same change against the current version.
         base[entity].set(u.id, copy(server));
@@ -496,6 +511,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     const unsent = new Set(); // local ids that failed to create; nothing may point at them
     const pointsAtUnsent = (r) => REF_FIELDS.some((f) => unsent.has(r[f]));
     let wrote = false;
+    overridden = 0;
     massDeletes = [];
     // The id is the retry's idempotency key, so it must be on disk before the first send.
     let named = false;
@@ -555,7 +571,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         wrote = true;
       }
     }
-    return { conflicts, failures, wrote };
+    return { conflicts, failures, wrote, overridden };
   }
 
   async function push(opts = {}) {
@@ -563,6 +579,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     if (pushing) { again = true; return; }
     pushing = true;
     let saved = false;
+    let offered = [];
     try {
       do {
         again = false;
@@ -574,22 +591,32 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
           const r = await pass(opts);
           conflicts = r.conflicts;
           failures = r.failures;
-          if (conflicts.length || failures.length) break;
+          // A conflict Nick agreed to was only rebased: one more pass sends it, even while
+          // another conflict waits for him.
+          if (failures.length || (conflicts.length && !r.overridden)) break;
           // Only a pass with nothing left to send proves everything landed.
           if (!r.wrote) { settled = true; break; }
         }
+        const named = (list) => list.map((c) => `${c.id} (${c.fields.join(', ')})`).join('; ');
+        const fresh = conflicts.filter((c) => !c.again);
+        const changedAgain = conflicts.filter((c) => c.again);
         const problems = [
           ...failures,
-          ...(conflicts.length ? [`Also changed elsewhere: ${conflicts.join('; ')}. Tap to keep yours.`] : [])
+          ...(fresh.length ? [`Also changed elsewhere: ${named(fresh)}. Tap to keep yours.`] : []),
+          ...(changedAgain.length ? [`Changed elsewhere again since you saw it: ${named(changedAgain)}. Review before retrying; a tap now keeps yours.`] : [])
         ];
+        offered = conflicts.map(({ entity, id, versionShown, fields }) => ({ entity, id, versionShown, fields }));
         if (problems.length) throw new Error(problems.join(' | '));
         if (!settled) throw new Error('Records kept changing while saving. Tap to try again.');
       } while (again);
       clearUnsaved();
       saved = true;
+      shown = [];
       status('signed-in');
     } catch (e) {
       log.error('[v2-sync] save failed:', e);
+      // What this message lists is all a later tap may override. Any other failure lists none.
+      shown = offered;
       markUnsaved();
       status('save-failed', e.message || String(e));
     } finally {
@@ -599,11 +626,15 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
   }
 
   /**
-   * The red pill's tap: Nick has seen the warning, so his copy wins this time. Conflicts
-   * only. A large delete still needs confirmMassDelete(), because a stale local copy looks
-   * exactly like one and a retry tap says nothing about wanting those records gone.
+   * The red pill's tap: Nick has seen the warning, so his copy wins for the conflicts it
+   * listed, at the versions and fields it listed, and nothing else. A conflict that changed
+   * again since, or one it never listed, goes back to red. Any other failure just resends:
+   * same base, same expected version, same idempotency key. A large delete still needs
+   * confirmMassDelete(), because a stale local copy looks exactly like one and a retry tap
+   * says nothing about wanting those records gone.
    */
   async function retry() {
+    const consent = shown;
     if (!loaded) {
       try {
         await load();
@@ -613,7 +644,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
         return;
       }
     }
-    await push({ localWins: true });
+    await push({ consent });
   }
 
   /**
@@ -668,7 +699,7 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
 
   /** Nick reviewed the list and wants these records deleted. */
   async function confirmMassDelete() {
-    await push({ localWins: true, allowMassDelete: true });
+    await push({ consent: shown, allowMassDelete: true });
   }
 
   /** Nick didn't want that: put the records back from the last server copy. */
