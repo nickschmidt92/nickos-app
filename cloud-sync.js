@@ -30,9 +30,9 @@ import {
 
 // Every local module is pinned with the release's ?v=, as service-worker.js precaches it:
 // an unpinned one is served cache-first, so a new page could run with the old release's copy.
-import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js?v=25";
-import { mergeById } from "./merge-by-id.js?v=25";
-import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=25";
+import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js?v=26";
+import { mergeById } from "./merge-by-id.js?v=26";
+import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=26";
 
 const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
 const POLL_MS = 60000;
