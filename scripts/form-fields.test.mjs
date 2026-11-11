@@ -174,3 +174,46 @@ test('nothing on the dashboard depends on statuses v2 removed', () => {
   assert.doesNotMatch(html, /t\.status === 'BLOCKED'/);
   assert.match(html, /Open blockers/);
 });
+
+// ── D-0245: every new task needs a project ─────────────────────────────────────
+function newTask(h, project) {
+  h.context.appState.editingTaskId = null;
+  h.els.taskTitle.value = 'Fresh';
+  h.els.taskProject.value = project;
+}
+
+test('D-0245: a new task with no project is refused and nothing is added', () => {
+  const h = harness({ tasks: [] });
+  let told = '';
+  h.context.alert = (m) => { told = m; };
+  newTask(h, '');
+  h.context.saveTask();
+  assert.equal(h.context.appState.tasks.length, 0);
+  assert.equal(told, 'Choose a project');
+});
+
+test('D-0245: a new task with a project is saved with it', () => {
+  const h = harness({ tasks: [] });
+  newTask(h, 'P-0001');
+  h.context.saveTask();
+  assert.equal(h.context.appState.tasks.length, 1);
+  assert.equal(h.context.appState.tasks[0].projectId, 'P-0001');
+});
+
+test('D-0245: an existing task with no project can still be edited', () => {
+  const t = { id: 'T-00002', title: 'Old', folder: 'LIFE', status: 'NEXT', projectId: '' };
+  const h = harness({ tasks: [t] });
+  openTask(h, t);
+  h.els.taskTitle.value = 'Old, renamed';
+  h.context.saveTask();
+  assert.equal(t.title, 'Old, renamed');
+  assert.equal(t.projectId, '');
+});
+
+test('D-0245: project pages have a + Task button that prefills the project', () => {
+  assert.match(html, /onclick="openTaskModal\(null, '\$\{project\.id\}'\)">\+ Task<\/button>/);
+  const a = html.indexOf('function openTaskModal(');
+  assert.match(html.slice(a, a + 80), /linkedProjectId = null/);
+  assert.match(lift('function openTaskModal(', 'function closeTaskModal'), /task\?\.projectId \|\| linkedProjectId \|\| ''/);
+  assert.match(html, /<select id="taskProject" required>/);
+});

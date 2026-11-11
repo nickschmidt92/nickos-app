@@ -1286,9 +1286,9 @@
                     <textarea id="taskNotes" placeholder="Additional details..." rows="3"></textarea>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Project</label>
-                    <select id="taskProject">
-                        <option value="">None</option>
+                    <label class="form-label">Project (required)</label>
+                    <select id="taskProject" required>
+                        <option value="">Choose a project…</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -2322,6 +2322,7 @@
 
                     <div class="flex gap-2" style="margin-top: 12px;">
                         <button class="btn small" onclick="openProjectModal('${project.id}')">Edit</button>
+                        <button class="btn small" onclick="openTaskModal(null, '${project.id}')">+ Task</button>
                         <button class="btn small" onclick="openDecisionModal(null, '${project.id}')">+ Decision</button>
                         <button class="btn small" onclick="openDocModal(null, '${project.id}')">+ Doc</button>
                         <button class="btn small" onclick="openBlockerModal(null, '${project.id}')">+ Blocker</button>
@@ -2569,7 +2570,8 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         }
 
         /* ═══════ MODALS ═══════ */
-        function openTaskModal(taskId = null) {
+        // D-0245: a new task needs a project. linkedProjectId prefills it from a project page.
+        function openTaskModal(taskId = null, linkedProjectId = null) {
             populateProjectSelects();
             appState.editingTaskId = taskId;
             const task = taskId ? appState.tasks.find(t => t.id === taskId) : null;
@@ -2584,7 +2586,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             setField('taskImpact', task?.impact || '');
             setField('taskNextAction', task?.nextAction || '');
             setField('taskNotes', task?.originalText || '');
-            setField('taskProject', task?.projectId || '');
+            setField('taskProject', task?.projectId || linkedProjectId || '');
             setField('taskTags', task?.tags?.join(', ') || '');
 
             document.getElementById('taskModal').classList.add('active');
@@ -2635,6 +2637,11 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
             const title = document.getElementById('taskTitle').value.trim();
             if (!title) {
                 alert('Title is required');
+                return;
+            }
+            // D-0245: new tasks only. An existing task with no project can still be edited.
+            if (!appState.editingTaskId && !document.getElementById('taskProject').value) {
+                alert('Choose a project');
                 return;
             }
 
@@ -3473,7 +3480,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         window.saveToLocalStorage = saveToLocalStorage;
         window.render = render;
     </script>
-    <script type="module" src="cloud-sync.js?v=25"></script>
+    <script type="module" src="cloud-sync.js?v=26"></script>
     <script>
         // All tabs share one local copy, so an older tab's autosave could overwrite a newer
         // tab's unsaved edits. The newest tab wins; the older one stops and offers to take over.
