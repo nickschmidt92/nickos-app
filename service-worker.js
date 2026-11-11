@@ -1,9 +1,9 @@
 // NickOS service worker — offline cache for the shell.
 // Bump CACHE_VERSION on every deploy to invalidate old caches.
-const CACHE_VERSION = 'nickos-v23';
+const CACHE_VERSION = 'nickos-v25';
 // The versioned script urls must match index.html and cloud-sync.js. The query makes a new page
 // fetch its own scripts: the old service worker's cache-first copy could pair it with old code.
-const SHELL = ['./', './index.html', './manifest.json', './icon.svg', './cloud-sync.js?v=23', './v2-sync.js?v=23', './merge-by-id.js', './firebase-config.js'];
+const SHELL = ['./', './index.html', './manifest.json', './icon.svg', './cloud-sync.js?v=25', './v2-sync.js?v=25', './merge-by-id.js?v=25', './firebase-config.js?v=25'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
