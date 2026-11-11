@@ -28,9 +28,11 @@ import {
   enableIndexedDbPersistence
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 
-import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js";
-import { mergeById } from "./merge-by-id.js";
-import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=24";
+// Every local module is pinned with the release's ?v=, as service-worker.js precaches it:
+// an unpinned one is served cache-first, so a new page could run with the old release's copy.
+import { firebaseConfig, backend as configuredBackend } from "./firebase-config.js?v=25";
+import { mergeById } from "./merge-by-id.js?v=25";
+import { createV2Sync, resolveBackend, isNotAuthorized, retryDelayMs } from "./v2-sync.js?v=25";
 
 const backend = resolveBackend(configuredBackend, location.hostname, localStorage);
 const POLL_MS = 60000;
@@ -73,7 +75,7 @@ appleProvider.addScope('name');
 
 const cloud = {
   user: null,             // firebase User or null
-  status: 'booting',      // 'booting' | 'signed-out' | 'signed-in' | 'syncing' | 'error' | 'save-failed'
+  status: 'booting',      // 'booting' | 'signed-out' | 'signed-in' | 'syncing' | 'saving' | 'error' | 'save-failed'
   lastError: null,
   unsubscribe: null,      // firestore listener disposer
   suppressNextRemote: false, // set true after a local push so we don't bounce it back to ourselves
@@ -517,6 +519,10 @@ function renderAuthUI() {
       break;
     case 'syncing':
       inner = `${dot('#fbbf24')} <span>Syncing…</span>`;
+      break;
+    case 'saving':
+      // An edit is on its way and the server hasn't acked it yet: not "Synced".
+      inner = `${dot('#fbbf24')} <span>Saving…</span>`;
       break;
     case 'signed-in':
       inner = `${dot('#10b981')} <span>Synced</span> <button id="cloud-signout-btn" style="all:unset;cursor:pointer;opacity:0.6;font-size:11px;">Sign out</button>`;

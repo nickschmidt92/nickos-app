@@ -583,7 +583,11 @@ export function createV2Sync({ apiBase, getToken, getState, storage, fetchImpl, 
     try {
       do {
         again = false;
-        if (edited()) markPending(baseJson());
+        if (edited()) {
+          markPending(baseJson());
+          // Not green until the server has acked it. Red stays red: that pill is the retry.
+          if (!hasUnsaved()) status('saving');
+        }
         let conflicts = [];
         let failures = [];
         let settled = false;

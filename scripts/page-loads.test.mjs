@@ -20,6 +20,11 @@ test('the page, its scripts and the service worker agree on one script version',
   assert.ok(html.includes(`src="cloud-sync.js?v=${version}"`), 'index.html');
   assert.ok(cloud.includes(`"./v2-sync.js?v=${version}"`), 'cloud-sync.js');
   assert.ok(sw.includes(`'./cloud-sync.js?v=${version}'`) && sw.includes(`'./v2-sync.js?v=${version}'`), 'SHELL');
+  // DF-20: the two modules cloud-sync.js imports are pinned too, or an old cache serves them.
+  for (const f of ['merge-by-id.js', 'firebase-config.js']) {
+    assert.ok(cloud.includes(`"./${f}?v=${version}"`), `cloud-sync.js imports ${f}`);
+    assert.ok(sw.includes(`'./${f}?v=${version}'`), `SHELL has ${f}`);
+  }
 });
 
 test('a phone has a New Task button that is always on screen, and the pill covers nothing (T-01715)', () => {
