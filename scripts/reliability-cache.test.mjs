@@ -320,7 +320,7 @@ test('restart: a create that landed but whose answer was lost makes one record, 
   assert.ok(b.state.tasks.some((t) => t.title === 'brand new' && /^T-\d+$/.test(t.id)), 'the page holds the server id');
 });
 
-test('reconnect: offline edits stay red (never green) until the server acks them', async () => {
+test('reconnect: offline edits are never green until the server acks them (amber "Saving…" while sending, then red)', async () => {
   const api = fakeApi({ tasks: [T(1)] });
   const storage = memStore();
   const a = await openPage(api, storage);
@@ -328,7 +328,9 @@ test('reconnect: offline edits stay red (never green) until the server acks them
   await a.edit((s) => { s.tasks[0].title = 'offline 1'; });
   await a.edit((s) => { s.tasks[0].notes = 'offline 2'; });
   const sinceEdit = a.statuses.slice(2).map((s) => s[0]);
-  assert.ok(sinceEdit.length && sinceEdit.every((s) => s === 'save-failed'), `statuses after the offline edits: ${sinceEdit}`);
+  // P7 (DF-19) added 'saving' (amber) between the edit and the failure; 'signed-in' (green) must never appear.
+  assert.ok(sinceEdit.length && sinceEdit.every((s) => s === 'saving' || s === 'save-failed'), `statuses after the offline edits: ${sinceEdit}`);
+  assert.equal(sinceEdit.at(-1), 'save-failed', 'the failed sends end red');
   api.down = false;
   await a.sync.retry();
   assert.equal(api.db.tasks.get('T-1').title, 'offline 1');
@@ -336,7 +338,8 @@ test('reconnect: offline edits stay red (never green) until the server acks them
   assert.equal(a.last(), 'signed-in');
 });
 
-defect('DEFECT: an edit in flight is shown "Synced" (green) before the server acknowledges it', async () => {
+test('FIXED (DF-19, P7 #19): an edit in flight is NOT shown "Synced" before the server acknowledges it', async () => {
+  // Was a DEFECT test; fixed by P7 #19. The comment below describes the defect as found.
   // cloud-sync.js renders 'signed-in' as a green dot + "Synced". v2-sync push() never moves
   // the status off 'signed-in' while it sends, so from the edit until the ack (or until a
   // failure) the pill keeps saying Synced. If the tab is closed in that window, Nick was
@@ -509,7 +512,8 @@ test('stale PWA, new page under the OLD service worker: pinned scripts come from
   }
 });
 
-defect('DEFECT: a new page under the OLD service worker gets the OLD merge-by-id.js / firebase-config.js (unpinned modules)', async () => {
+test('FIXED (DF-20, P7 #19): a new page under the OLD service worker gets the NEW merge-by-id.js / firebase-config.js (modules pinned)', async () => {
+  // Was a DEFECT test; fixed by P7 #19. The comment below describes the defect as found.
   // service-worker.js:4-5 pins cloud-sync.js and v2-sync.js with ?v= so "the old service
   // worker's cache-first copy could [not] pair it with old code". merge-by-id.js and
   // firebase-config.js are imported by cloud-sync.js WITHOUT a pin and are cache-first, so

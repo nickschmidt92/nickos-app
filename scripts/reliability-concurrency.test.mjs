@@ -129,7 +129,8 @@ test('baseline: a same-field conflict goes red, names the field, and overwrites 
   assert.equal(s.api.db.tasks.get('T-1').status, 'DONE', 'the agent\'s resolution stands until Nick decides');
 });
 
-defect('DEFECT: the tap overwrites an agent edit that landed AFTER the conflict Nick was shown', async () => {
+test('FIXED (DF-18, P4 #18): the tap does NOT overwrite an agent edit that landed AFTER the conflict Nick was shown', async () => {
+  // Was a DEFECT test; fixed by P4 #18. The comment below describes the defect as found.
   const s = await setup({ tasks: [T(1)] });
   // Conflict #1: Nick is shown "T-1 (status)" against the agent's IN_PROGRESS.
   await agentEdit(s.api, 'tasks', 'T-1', { status: 'IN_PROGRESS' });
@@ -150,7 +151,8 @@ defect('DEFECT: the tap overwrites an agent edit that landed AFTER the conflict 
   assert.equal(r.notes, 'RESOLVED by agent: root cause fixed in PR #51', 'a field Nick never edited must survive regardless');
 });
 
-defect('DEFECT: unsaved edits from an earlier session overwrite a newer agent edit on the first tap, with no field named', async () => {
+test('FIXED (DF-18, P4 #18): unsaved edits from an earlier session do NOT overwrite a newer agent edit on the first tap', async () => {
+  // Was a DEFECT test; fixed by P4 #18. The comment below describes the defect as found.
   // Session 1: Nick sets T-1 to WAITING offline; it stays red and unsaved.
   const a = await setup({ tasks: [T(1)] });
   a.api.down = true;
@@ -175,7 +177,8 @@ defect('DEFECT: unsaved edits from an earlier session overwrite a newer agent ed
     'no field-level warning that someone else had changed status');
 });
 
-defect('DEFECT: the tap also overrides a conflict on a DIFFERENT record that was never shown', async () => {
+test('FIXED (DF-18, P4 #18): the tap does NOT override a conflict on a DIFFERENT record that was never shown', async () => {
+  // Was a DEFECT test; fixed by P4 #18. The comment below describes the defect as found.
   const s = await setup({ tasks: [T(1), T(2)] });
   // A shown conflict on T-1 makes the pill red.
   await agentEdit(s.api, 'tasks', 'T-1', { title: 'agent title' });
