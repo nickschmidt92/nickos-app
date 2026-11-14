@@ -1158,12 +1158,6 @@
                         <span>Review</span>
                     </a>
                 </li>
-                <li class="nav-item">
-                    <a class="nav-link" data-page="aiphone">
-                        <span class="nav-icon">📞</span>
-                        <span>AI Phone</span>
-                    </a>
-                </li>
             </nav>
             <div style="padding: 12px 0; border-top: 1px solid #1e1e1e;">
                 <button class="nav-link" onclick="openSearch()" style="width: 100%; border-left: 3px solid transparent;">
@@ -1207,7 +1201,6 @@
                 <div class="nav-tab" data-page="projects">📁</div>
                 <div class="nav-tab" data-page="triage">🎯</div>
                 <div class="nav-tab" data-page="review">✅</div>
-                <div class="nav-tab" data-page="aiphone">📞</div>
             </div>
         </div>
     </div>
@@ -3480,7 +3473,7 @@ ${document.getElementById('reviewFollowup').value || 'N/A'}`;
         window.saveToLocalStorage = saveToLocalStorage;
         window.render = render;
     </script>
-    <script type="module" src="cloud-sync.js?v=26"></script>
+    <script type="module" src="cloud-sync.js?v=27"></script>
     <script>
         // All tabs share one local copy, so an older tab's autosave could overwrite a newer
         // tab's unsaved edits. The newest tab wins; the older one stops and offers to take over.
